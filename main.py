@@ -12,7 +12,7 @@ import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-from astrbot.api.all import *   # 包含 register, command, filter, Star, Context, AstrMessageEvent
+from astrbot.api.all import *  # 包含 register, command, Star, Context, AstrMessageEvent
 
 # ======================================================================
 # 加密常量（完整，来自酷我逆向）
@@ -282,7 +282,7 @@ class KuwoAPI:
 # ======================================================================
 # 插件主类
 # ======================================================================
-@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.0.9", "https://github.com/YourName/astrbot_plugin_kuwo")
+@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.1.0", "https://github.com/YourName/astrbot_plugin_kuwo")
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -316,9 +316,8 @@ class KuwoPlugin(Star):
         self.states[user_id] = {'menu': 'main', 'step': None, 'last_active': time.time()}
         yield event.plain_result(self._main_menu())
 
-    # 关键修复：使用 @filter('regex', '.*') 监听所有消息
-    @filter('regex', '.*')
-    async def handle_all_messages(self, event: AstrMessageEvent):
+    # ========== 核心：重写 on_message 监听所有消息 ==========
+    async def on_message(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         if user_id not in self.states:
             return
