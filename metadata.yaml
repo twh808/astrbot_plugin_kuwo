@@ -1,12 +1,37 @@
 name: astrbot_plugin_kuwo
 display_name: 酷我音乐管理
-version: "1.0.0"
-desc: 酷我音乐账号管理与提现交互插件（支持绑定/解绑/验证码/提现）
-short_desc: 酷我音乐账号绑定、验证码、提现等功能
+version: "2.0.0"
+desc: 酷我音乐账号绑定、验证码获取、提现管理（支持多账号、授权次数、定时任务）
+short_desc: 酷我音乐账号绑定、验证码、提现（含自动/立即执行）
 author: YourName
 repo: https://github.com/YourName/astrbot_plugin_kuwo
 astrbot_version: ">=4.0.0"
 tags:
   - music
   - kuwo
-  - management
+  - withdraw
+config:
+  - name: default_auth_limit
+    type: int
+    default: 3
+    desc: 默认授权次数（每个QQ号名下所有账户共用）
+  - name: verification_cron
+    type: str
+    default: "55 8,12,16,19 * * *"
+    desc: 定时获取验证码的cron表达式（分 时 日 月 周）
+  - name: withdraw_cron
+    type: str
+    default: "59 8,12,16,19 * * *"
+    desc: 自动提现的cron表达式（分 时 日 月 周）
+  - name: verification_id
+    type: str
+    default: "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D"
+    desc: 提现接口所需的verificationId
+  - name: q36
+    type: str
+    default: "a9441d902f38da7d2d25bf1f10001a319907"
+    desc: 设备指纹q36
+  - name: kwtxid
+    type: str
+    default: "30002"
+    desc: 配额ID
