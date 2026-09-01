@@ -13,10 +13,9 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
 from astrbot.api.all import *
-from astrbot.api import logger
 
 # ======================================================================
-# 1. 加密常量（完整，来自酷我逆向）
+# 加密常量（完整，来自酷我逆向）
 # ======================================================================
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
@@ -175,7 +174,7 @@ def decrypt_phone(encrypted_phone):
     return decrypted_data.decode('UTF-8')
 
 # ======================================================================
-# 2. 酷我 API 封装
+# 酷我 API 封装
 # ======================================================================
 class KuwoAPI:
     @staticmethod
@@ -281,9 +280,9 @@ class KuwoAPI:
             return False
 
 # ======================================================================
-# 3. AstrBot 插件主类（使用事件总线监听消息）
+# AstrBot 插件主类（纯 @command 模式，无装饰器冲突）
 # ======================================================================
-@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.2.1", "https://github.com/YourName/astrbot_plugin_kuwo")
+@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.3.0", "https://github.com/YourName/astrbot_plugin_kuwo")
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -292,8 +291,6 @@ class KuwoPlugin(Star):
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
-        self.states = {}
-        self._message_handler = None  # 用于保存监听器句柄，以便取消
 
     async def _load_data(self, user_id: str) -> dict:
         data = await self.get_kv_data("kuwo_data", {})
@@ -309,248 +306,166 @@ class KuwoPlugin(Star):
 
     def _main_menu(self) -> str:
         return ("🎵 酷我音乐管理菜单\n"
-                "1️⃣ 绑定账号\n2️⃣ 解绑账号\n3️⃣ 查看账号\n4️⃣ 获取验证码\n"
-                "5️⃣ 提交验证码\n6️⃣ 立即提现\n8️⃣ 帮助\n0️⃣ 退出")
+                "酷我绑定 手机号#密码#授权次数  绑定账号（授权次数可选）\n"
+                "酷我解绑                    解绑所有账号\n"
+                "酷我查看                    查看已绑账号\n"
+                "酷我验证码                  立即发送验证码\n"
+                "酷我提交 验证码             提交验证码（缓存5分钟）\n"
+                "酷我提现                    立即提现\n"
+                "酷我帮助                    显示此帮助")
 
     @command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
-        user_id = event.get_sender_id()
-        self.states[user_id] = {'menu': 'main', 'step': None, 'last_active': time.time()}
         yield event.plain_result(self._main_menu())
 
-    # ========== 消息处理核心逻辑 ==========
-    async def _handle_message(self, event: AstrMessageEvent):
-        """消息处理函数（将由事件总线调用）"""
+    @command("酷我绑定")
+    async def kuwo_bind(self, event: AstrMessageEvent):
+        args = event.message_str.strip().split()
+        if len(args) < 2:
+            yield event.plain_result("❌ 格式错误，正确格式：酷我绑定 手机号#密码 或 手机号#密码#授权次数")
+            return
+        param = args[1]
+        items = param.split('#')
+        if len(items) < 2:
+            yield event.plain_result("❌ 格式错误，正确格式：手机号#密码 或 手机号#密码#授权次数")
+            return
+        phone = items[0].strip()
+        password = items[1].strip()
+        limit = None
+        if len(items) >= 3 and items[2].strip().isdigit():
+            limit = int(items[2].strip())
+        if not phone or not password:
+            yield event.plain_result("❌ 手机号或密码为空")
+            return
         user_id = event.get_sender_id()
-        if user_id not in self.states:
-            return
-        state = self.states[user_id]
-
-        # 超时检查
-        if time.time() - state['last_active'] > 120:
-            del self.states[user_id]
-            await self.context.send_message(event.unified_msg_origin, "⏰ 操作超时，已退出菜单，请重新发送“酷我”进入。")
-            return
-        state['last_active'] = time.time()
-
-        text = event.message_str.strip()
-        menu = state['menu']
-        step = state.get('step')
-
-        logger.info(f"处理消息: {text}, 菜单: {menu}, 步骤: {step}")
-
-        # ---- 步骤处理 ----
-        if step == 'binding':
-            user_data = await self._load_data(user_id)
-            parts = text.split('&')
-            errors = []
-            new_accounts = []
-            for p in parts:
-                p = p.strip()
-                if not p: continue
-                items = p.split('#')
-                if len(items) < 2:
-                    errors.append(f"格式错误: {p}")
-                    continue
-                phone = items[0].strip()
-                password = items[1].strip()
-                limit = None
-                if len(items) >= 3 and items[2].strip().isdigit():
-                    limit = int(items[2].strip())
-                if not phone or not password:
-                    errors.append(f"手机号或密码为空: {p}")
-                    continue
-                new_accounts.append({"phone": phone, "password": password})
-                if limit is not None:
-                    user_data["auth_limit"] = limit
-            if errors:
-                state['step'] = None
-                state['menu'] = 'main'
-                await self.context.send_message(event.unified_msg_origin, "❌ 绑定失败：\n" + "\n".join(errors))
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-                return
-            if not new_accounts:
-                await self.context.send_message(event.unified_msg_origin, "未解析到有效账号，请重新输入")
-                return
-            existing = {a["phone"] for a in user_data["accounts"]}
-            for a in new_accounts:
-                if a["phone"] not in existing:
-                    user_data["accounts"].append(a)
-                    existing.add(a["phone"])
+        user_data = await self._load_data(user_id)
+        if limit is not None:
+            user_data["auth_limit"] = limit
+        existing = {a["phone"] for a in user_data["accounts"]}
+        if phone in existing:
+            for a in user_data["accounts"]:
+                if a["phone"] == phone:
+                    a["password"] = password
+                    break
             await self._save_data(user_id, user_data)
-            state['step'] = None
-            state['menu'] = 'main'
-            await self.context.send_message(event.unified_msg_origin, f"✅ 绑定成功，共 {len(user_data['accounts'])} 个账号，授权次数 {user_data['auth_limit']}")
-            await self.context.send_message(event.unified_msg_origin, self._main_menu())
-            return
-
-        if step == 'code_input':
-            if not text.isdigit() or len(text) != 6:
-                await self.context.send_message(event.unified_msg_origin, "❌ 请输入6位数字验证码")
-                return
-            user_data = await self._load_data(user_id)
-            if not user_data["accounts"]:
-                await self.context.send_message(event.unified_msg_origin, "❌ 您还没有绑定账号")
-                state['step'] = None
-                state['menu'] = 'main'
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-                return
-            for acc in user_data["accounts"]:
-                user_data["verification_codes"][acc["phone"]] = {"code": text, "expire": time.time() + 300}
+            yield event.plain_result(f"✅ 账号 {phone} 密码已更新，授权次数 {user_data['auth_limit']}")
+        else:
+            user_data["accounts"].append({"phone": phone, "password": password})
             await self._save_data(user_id, user_data)
-            state['step'] = None
-            state['menu'] = 'main'
-            await self.context.send_message(event.unified_msg_origin, f"✅ 验证码 {text} 已缓存（5分钟有效）")
-            await self.context.send_message(event.unified_msg_origin, self._main_menu())
+            yield event.plain_result(f"✅ 账号 {phone} 绑定成功，授权次数 {user_data['auth_limit']}")
+
+    @command("酷我解绑")
+    async def kuwo_unbind(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        user_data = await self._load_data(user_id)
+        if user_data["accounts"]:
+            user_data["accounts"] = []
+            await self._save_data(user_id, user_data)
+            yield event.plain_result("✅ 已解绑所有账号")
+        else:
+            yield event.plain_result("❌ 您还没有绑定任何账号")
+
+    @command("酷我查看")
+    async def kuwo_view(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        user_data = await self._load_data(user_id)
+        if user_data["accounts"]:
+            lines = [f"📱 {a['phone']}" for a in user_data["accounts"]]
+            lines.append(f"📊 剩余授权次数：{user_data['auth_limit']}")
+            yield event.plain_result("📋 您绑定的账号：\n" + "\n".join(lines))
+        else:
+            yield event.plain_result("❌ 您还没有绑定任何账号")
+
+    @command("酷我验证码")
+    async def kuwo_send_code(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        user_data = await self._load_data(user_id)
+        if not user_data["accounts"]:
+            yield event.plain_result("❌ 请先绑定账号")
             return
+        results = []
+        for acc in user_data["accounts"]:
+            phone = acc["phone"]
+            login = await asyncio.to_thread(KuwoAPI.login, phone, acc["password"])
+            if not login:
+                results.append(f"❌ {phone}: 登录失败")
+                continue
+            uid, sid, appuid, _ = login
+            enc_phone = encrypt_phone(phone)
+            if await asyncio.to_thread(KuwoAPI.check_today_withdraw, uid, sid):
+                results.append(f"⏭️ {phone}: 今日已提现，跳过")
+                continue
+            success, msg = await asyncio.to_thread(KuwoAPI.send_code, uid, sid, appuid, enc_phone, self.kwtxid)
+            results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
+        yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(results))
 
-        # ---- 主菜单 ----
-        if menu == 'main':
-            if text == "0":
-                del self.states[user_id]
-                await self.context.send_message(event.unified_msg_origin, "👋 已退出菜单")
-                return
-            elif text == "1":
-                state['step'] = 'binding'
-                await self.context.send_message(event.unified_msg_origin, "📱 请输入 手机号#密码（可多个用 & 分隔，可附加 #授权次数）")
-            elif text == "2":
-                user_data = await self._load_data(user_id)
-                if user_data["accounts"]:
-                    user_data["accounts"] = []
-                    await self._save_data(user_id, user_data)
-                    await self.context.send_message(event.unified_msg_origin, "✅ 已解绑所有账号")
-                else:
-                    await self.context.send_message(event.unified_msg_origin, "❌ 您还没有绑定任何账号")
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-            elif text == "3":
-                user_data = await self._load_data(user_id)
-                if user_data["accounts"]:
-                    lines = [f"📱 {a['phone']}" for a in user_data["accounts"]]
-                    lines.append(f"📊 剩余授权次数：{user_data['auth_limit']}")
-                    await self.context.send_message(event.unified_msg_origin, "📋 您绑定的账号：\n" + "\n".join(lines))
-                else:
-                    await self.context.send_message(event.unified_msg_origin, "❌ 您还没有绑定任何账号")
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-            elif text == "4":
-                state['menu'] = 'get_code'
-                await self.context.send_message(event.unified_msg_origin, "📨 1️⃣ 立即发送验证码\n0️⃣ 返回主菜单")
-            elif text == "5":
-                state['step'] = 'code_input'
-                await self.context.send_message(event.unified_msg_origin, "🔢 请输入6位验证码")
-            elif text == "6":
-                state['menu'] = 'withdraw'
-                await self.context.send_message(event.unified_msg_origin, "💰 1️⃣ 立即提现\n0️⃣ 返回主菜单")
-            elif text == "8":
-                await self.context.send_message(event.unified_msg_origin, "帮助：绑定格式 手机号#密码#授权次数（可选）\n提现需先获取并提交验证码，成功扣减授权次数。\n120秒无操作自动退出。")
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-            else:
-                await self.context.send_message(event.unified_msg_origin, "❌ 无效选项")
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
+    @command("酷我提交")
+    async def kuwo_submit_code(self, event: AstrMessageEvent):
+        args = event.message_str.strip().split()
+        if len(args) < 2:
+            yield event.plain_result("❌ 请提供验证码，格式：酷我提交 123456")
+            return
+        code = args[1].strip()
+        if not code.isdigit() or len(code) != 6:
+            yield event.plain_result("❌ 验证码必须为6位数字")
+            return
+        user_id = event.get_sender_id()
+        user_data = await self._load_data(user_id)
+        if not user_data["accounts"]:
+            yield event.plain_result("❌ 您还没有绑定账号")
+            return
+        for acc in user_data["accounts"]:
+            user_data["verification_codes"][acc["phone"]] = {"code": code, "expire": time.time() + 300}
+        await self._save_data(user_id, user_data)
+        yield event.plain_result(f"✅ 验证码 {code} 已缓存（5分钟有效）")
 
-        # ---- 获取验证码子菜单 ----
-        elif menu == 'get_code':
-            if text == "0":
-                state['menu'] = 'main'
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-                return
-            elif text == "1":
-                user_data = await self._load_data(user_id)
-                if not user_data["accounts"]:
-                    await self.context.send_message(event.unified_msg_origin, "❌ 请先绑定账号")
-                    state['menu'] = 'main'
-                    await self.context.send_message(event.unified_msg_origin, self._main_menu())
-                    return
-                results = []
-                for acc in user_data["accounts"]:
-                    phone = acc["phone"]
-                    login = await asyncio.to_thread(KuwoAPI.login, phone, acc["password"])
-                    if not login:
-                        results.append(f"❌ {phone}: 登录失败")
-                        continue
-                    uid, sid, appuid, _ = login
-                    enc_phone = encrypt_phone(phone)
-                    if await asyncio.to_thread(KuwoAPI.check_today_withdraw, uid, sid):
-                        results.append(f"⏭️ {phone}: 今日已提现，跳过")
-                        continue
-                    success, msg = await asyncio.to_thread(KuwoAPI.send_code, uid, sid, appuid, enc_phone, self.kwtxid)
-                    results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
-                await self.context.send_message(event.unified_msg_origin, "📨 验证码发送结果：\n" + "\n".join(results))
-                state['menu'] = 'main'
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-            else:
-                await self.context.send_message(event.unified_msg_origin, "❌ 无效选项，请输入 1 或 0")
+    @command("酷我提现")
+    async def kuwo_withdraw(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        user_data = await self._load_data(user_id)
+        if not user_data["accounts"]:
+            yield event.plain_result("❌ 请先绑定账号")
+            return
+        if user_data["auth_limit"] <= 0:
+            yield event.plain_result("❌ 授权次数已用完")
+            return
+        accounts = user_data["accounts"][:user_data["auth_limit"]]
+        results = []
+        success_count = 0
+        codes = user_data.get("verification_codes", {})
+        for acc in accounts:
+            phone = acc["phone"]
+            code_info = codes.get(phone)
+            if not code_info or time.time() > code_info.get("expire", 0):
+                results.append(f"❌ {phone}: 验证码未获取或已过期")
+                continue
+            login = await asyncio.to_thread(KuwoAPI.login, phone, acc["password"])
+            if not login:
+                results.append(f"❌ {phone}: 登录失败")
+                continue
+            uid, sid, appuid, _ = login
+            if await asyncio.to_thread(KuwoAPI.check_today_withdraw, uid, sid):
+                results.append(f"⏭️ {phone}: 今日已提现，跳过")
+                continue
+            enc_phone = encrypt_phone(phone)
+            code = code_info["code"]
+            success, msg = await asyncio.to_thread(
+                KuwoAPI.withdraw,
+                uid, sid, appuid, enc_phone, code,
+                self.kwtxid, self.verification_id, self.q36
+            )
+            if success:
+                success_count += 1
+                user_data["auth_limit"] -= 1
+                today = datetime.now().strftime("%Y-%m-%d")
+                if today not in user_data["daily_withdraw"]:
+                    user_data["daily_withdraw"][today] = {}
+                user_data["daily_withdraw"][today][phone] = True
+                await self._save_data(user_id, user_data)
+            results.append(f"{'✅ 提现成功' if success else '❌ 提现失败'} {phone}: {msg}")
+        summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {user_data['auth_limit']}\n━━━━━━━━━━━━\n"
+        yield event.plain_result(summary + "\n".join(results))
 
-        # ---- 提现子菜单 ----
-        elif menu == 'withdraw':
-            if text == "0":
-                state['menu'] = 'main'
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-                return
-            elif text == "1":
-                user_data = await self._load_data(user_id)
-                if not user_data["accounts"]:
-                    await self.context.send_message(event.unified_msg_origin, "❌ 请先绑定账号")
-                    state['menu'] = 'main'
-                    await self.context.send_message(event.unified_msg_origin, self._main_menu())
-                    return
-                if user_data["auth_limit"] <= 0:
-                    await self.context.send_message(event.unified_msg_origin, "❌ 授权次数已用完")
-                    state['menu'] = 'main'
-                    await self.context.send_message(event.unified_msg_origin, self._main_menu())
-                    return
-                accounts = user_data["accounts"][:user_data["auth_limit"]]
-                results = []
-                success_count = 0
-                codes = user_data.get("verification_codes", {})
-                for acc in accounts:
-                    phone = acc["phone"]
-                    code_info = codes.get(phone)
-                    if not code_info or time.time() > code_info.get("expire", 0):
-                        results.append(f"❌ {phone}: 验证码未获取或已过期")
-                        continue
-                    login = await asyncio.to_thread(KuwoAPI.login, phone, acc["password"])
-                    if not login:
-                        results.append(f"❌ {phone}: 登录失败")
-                        continue
-                    uid, sid, appuid, _ = login
-                    if await asyncio.to_thread(KuwoAPI.check_today_withdraw, uid, sid):
-                        results.append(f"⏭️ {phone}: 今日已提现，跳过")
-                        continue
-                    enc_phone = encrypt_phone(phone)
-                    code = code_info["code"]
-                    success, msg = await asyncio.to_thread(
-                        KuwoAPI.withdraw,
-                        uid, sid, appuid, enc_phone, code,
-                        self.kwtxid, self.verification_id, self.q36
-                    )
-                    if success:
-                        success_count += 1
-                        user_data["auth_limit"] -= 1
-                        today = datetime.now().strftime("%Y-%m-%d")
-                        if today not in user_data["daily_withdraw"]:
-                            user_data["daily_withdraw"][today] = {}
-                        user_data["daily_withdraw"][today][phone] = True
-                        await self._save_data(user_id, user_data)
-                    results.append(f"{'✅ 提现成功' if success else '❌ 提现失败'} {phone}: {msg}")
-                summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {user_data['auth_limit']}\n━━━━━━━━━━━━\n"
-                await self.context.send_message(event.unified_msg_origin, summary + "\n".join(results))
-                state['menu'] = 'main'
-                await self.context.send_message(event.unified_msg_origin, self._main_menu())
-            else:
-                await self.context.send_message(event.unified_msg_origin, "❌ 无效选项，请输入 1 或 0")
-
-    # ========== 注册事件监听器 ==========
-    async def initialize(self):
-        """插件初始化时注册消息监听器"""
-        self._message_handler = self.context.event_bus.subscribe(
-            AstrMessageEvent,
-            self._handle_message,
-            priority=10  # 较高优先级，先于默认处理器
-        )
-        logger.info("✅ 酷我插件消息监听器已注册")
-
-    async def terminate(self):
-        """插件卸载时取消监听器"""
-        if self._message_handler:
-            self.context.event_bus.unsubscribe(AstrMessageEvent, self._message_handler)
-            logger.info("✅ 酷我插件消息监听器已取消")
+    @command("酷我帮助")
+    async def kuwo_help(self, event: AstrMessageEvent):
+        yield event.plain_result(self._main_menu())
