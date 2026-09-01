@@ -1,7 +1,7 @@
 {
     "default_auth_limit": {
         "description": "默认授权次数（每个用户）",
-        "type": "number",
+        "type": "int",
         "default": 3,
         "hint": "提现成功扣减一次"
     },
@@ -31,19 +31,19 @@
     },
     "timeout": {
         "description": "交互超时时间（秒）",
-        "type": "number",
+        "type": "int",
         "default": 120,
         "hint": "菜单无操作自动退出"
     },
     "max_retries": {
         "description": "提现最大重试次数",
-        "type": "number",
+        "type": "int",
         "default": 3,
         "hint": "遇到'频繁'错误时重试"
     },
     "retry_delay_ms": {
         "description": "提现重试延迟（毫秒）",
-        "type": "number",
+        "type": "int",
         "default": 4000,
         "hint": "重试间隔"
     },
