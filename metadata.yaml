@@ -1,15 +1,12 @@
-# metadata.yaml
-name: astrbot_plugin_kuwo           # 插件标识符，英文，必须唯一[reference:16]
-display_name: 酷我音乐管理            # 插件展示名称（在插件市场/WebUI中显示）[reference:17]
-version: "1.0.0"                    # 插件版本号（遵循语义化版本规范）[reference:18]
-desc: 酷我音乐账号管理与提现交互插件   # 详细描述，支持 Markdown[reference:19]
-short_desc: 酷我音乐账号绑定、验证码、提现等功能  # 短描述，用于卡片展示[reference:20]
-author: YourName                    # 作者名称[reference:21]
-repo: https://github.com/YourName/astrbot_plugin_kuwo  # 仓库地址[reference:22]
-astrbot_version: ">=4.0.0"          # （可选）支持的 AstrBot 版本范围[reference:23]
-support_platforms:                  # （可选）支持的平台[reference:24]
-  - aiocqhttp
-  - qq_official
-tags:                               # （可选）标签，用于插件市场分类[reference:25]
+name: astrbot_plugin_kuwo
+display_name: 酷我音乐管理
+version: "1.0.0"
+desc: 酷我音乐账号管理与提现交互插件（支持绑定/解绑/验证码/提现）
+short_desc: 酷我音乐账号绑定、验证码、提现等功能
+author: YourName
+repo: https://github.com/YourName/astrbot_plugin_kuwo
+astrbot_version: ">=4.0.0"
+tags:
   - music
   - kuwo
+  - management
