@@ -6,7 +6,62 @@
       "default": 3,
       "label": "默认授权次数",
       "description": "每个用户默认的授权次数（提现成功扣减）"
+    },{
+    "default_auth_limit": {
+        "description": "默认授权次数（每个用户）",
+        "type": "number",
+        "default": 3,
+        "hint": "提现成功扣减一次"
     },
+    "verification_cron": {
+        "description": "定时获取验证码的cron表达式",
+        "type": "string",
+        "default": "12 55 8,12,16,19 * * *",
+        "hint": "秒 分 时 日 月 周，例如：12 55 8,12,16,19 * * *"
+    },
+    "verification_id": {
+        "description": "验证会话ID (verificationId)",
+        "type": "string",
+        "default": "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D",
+        "hint": "提现接口所需"
+    },
+    "q36": {
+        "description": "设备指纹 (q36)",
+        "type": "string",
+        "default": "a9441d902f38da7d2d25bf1f10001a319907",
+        "hint": "提现接口所需"
+    },
+    "kwtxid": {
+        "description": "配额ID (kwtxid)",
+        "type": "string",
+        "default": "30002",
+        "hint": "提现接口所需"
+    },
+    "timeout": {
+        "description": "交互超时时间（秒）",
+        "type": "number",
+        "default": 120,
+        "hint": "菜单无操作自动退出"
+    },
+    "max_retries": {
+        "description": "提现最大重试次数",
+        "type": "number",
+        "default": 3,
+        "hint": "遇到'频繁'错误时重试"
+    },
+    "retry_delay_ms": {
+        "description": "提现重试延迟（毫秒）",
+        "type": "number",
+        "default": 4000,
+        "hint": "重试间隔"
+    },
+    "quota_id": {
+        "description": "验证码配额ID",
+        "type": "string",
+        "default": "60004",
+        "hint": "发送验证码时使用的配额ID"
+    }
+}
     {
       "key": "verification_cron",
       "type": "string",
