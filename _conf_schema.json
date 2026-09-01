@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "display_name": "酷我音乐管理",
+  "description": "酷我音乐账号绑定、验证码、提现插件配置",
+  "config": [
+    {
+      "key": "default_auth_limit",
+      "label": "默认授权次数",
+      "type": "number",
+      "default": 3,
+      "description": "每个用户默认的授权次数（提现成功扣减）",
+      "min": 1,
+      "max": 999
+    },
+    {
+      "key": "verification_cron",
+      "label": "定时获取验证码 Cron",
+      "type": "string",
+      "default": "12 55 8,12,16,19 * * *",
+      "description": "定时获取验证码的cron表达式（秒 分 时 日 月 周）"
+    },
+    {
+      "key": "verification_id",
+      "label": "验证会话ID (verificationId)",
+      "type": "string",
+      "default": "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D",
+      "description": "提现接口所需的 verificationId"
+    },
+    {
+      "key": "q36",
+      "label": "设备指纹 (q36)",
+      "type": "string",
+      "default": "a9441d902f38da7d2d25bf1f10001a319907",
+      "description": "提现接口所需的设备指纹"
+    },
+    {
+      "key": "kwtxid",
+      "label": "配额ID (kwtxid)",
+      "type": "string",
+      "default": "30002",
+      "description": "提现接口所需的配额ID"
+    },
+    {
+      "key": "timeout",
+      "label": "交互超时时间（秒）",
+      "type": "number",
+      "default": 120,
+      "description": "菜单交互无操作超时时间",
+      "min": 30,
+      "max": 600
+    },
+    {
+      "key": "max_retries",
+      "label": "提现最大重试次数",
+      "type": "number",
+      "default": 3,
+      "description": "提现遇到'频繁'错误时的最大重试次数",
+      "min": 0,
+      "max": 10
+    },
+    {
+      "key": "retry_delay_ms",
+      "label": "提现重试延迟（毫秒）",
+      "type": "number",
+      "default": 4000,
+      "description": "提现重试间隔时间（毫秒）",
+      "min": 1000,
+      "max": 10000
+    },
+    {
+      "key": "quota_id",
+      "label": "验证码配额ID",
+      "type": "string",
+      "default": "60004",
+      "description": "发送验证码时使用的配额ID"
+    }
+  ]
+}
