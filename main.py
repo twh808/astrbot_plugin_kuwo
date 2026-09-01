@@ -367,13 +367,12 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.1.7 版）
+# 3. AstrBot 插件主类（2.1.8 版，所有命令支持输入 0 取消）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
-        # 从配置读取
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
         self.verification_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
@@ -519,7 +518,7 @@ class KuwoPlugin(Star):
 
         elif text == "1":
             self._update_state(user_id, step='binding')
-            yield event.plain_result("📱 请输入手机号#密码（可多个用 & 分隔）")
+            yield event.plain_result("📱 请输入手机号#密码（可多个用 & 分隔），输入 0 取消")
 
         elif text == "2":
             user_data = await self._load_data(user_id)
@@ -528,7 +527,7 @@ class KuwoPlugin(Star):
                 yield event.plain_result(self._main_menu())
                 return
             lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
-            prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）（发送 q 取消）："
+            prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1），输入 0 取消："
             yield event.plain_result(prompt)
             self._update_state(user_id, step='waiting_delete', tmp_data={'accounts': user_data["accounts"]})
 
@@ -553,12 +552,11 @@ class KuwoPlugin(Star):
                 yield event.plain_result(self._main_menu())
                 return
             lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
-            prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号（发送 q 取消）："
+            prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号，输入 0 取消："
             yield event.plain_result(prompt)
             self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"]})
 
         elif text == "6":
-            # 进入验证码子菜单（与 4 相同）
             self._update_state(user_id, menu='verify', step=None)
             yield event.plain_result(self._verify_menu())
 
@@ -654,7 +652,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._main_menu())
 
         elif text == "3":
-            # 进入设置定时规则状态
             self._update_state(user_id, step='set_cron')
             current_cron = (await self._load_data(user_id)).get("cron", "未设置")
             yield event.plain_result(f"📝 当前定时规则：{current_cron}\n请输入新的cron表达式（格式：秒 分 时 日 月 周）\n例如：12 55 8,12,16,19 * * *\n输入 0 取消，输入 off 关闭定时。")
@@ -685,7 +682,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._main_menu())
             return
 
-        # 验证cron格式
         parts = text.split()
         if len(parts) not in (5, 6):
             yield event.plain_result("❌ cron表达式格式错误，应为5或6个字段，请重新输入")
@@ -720,16 +716,17 @@ class KuwoPlugin(Star):
         if state.get('step') != 'waiting_send_select':
             return
 
-        self._cancel_timeout(user_id)
-        self._schedule_timeout(user_id)
-
         text = event.message_str.strip().lower()
-        accounts = state.get('tmp_data', {}).get('accounts', [])
-
+        # 检查是否为取消（0）
         if text == "0":
             self._update_state(user_id, menu='verify', step=None)
             yield event.plain_result(self._verify_menu())
             return
+
+        self._cancel_timeout(user_id)
+        self._schedule_timeout(user_id)
+
+        accounts = state.get('tmp_data', {}).get('accounts', [])
 
         phones_to_send = []
         if text == "all":
@@ -789,12 +786,17 @@ class KuwoPlugin(Star):
         if state.get('step') != 'waiting_code_phone':
             return
 
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='main', step=None)
+            yield event.plain_result(self._main_menu())
+            return
+
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
 
-        current_text = event.message_str.strip()
         try:
-            idx = int(current_text)
+            idx = int(text)
         except:
             yield event.plain_result("❌ 请输入有效的数字")
             return
@@ -816,10 +818,16 @@ class KuwoPlugin(Star):
         if state.get('step') != 'waiting_code_input':
             return
 
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='main', step=None)
+            yield event.plain_result(self._main_menu())
+            return
+
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
 
-        code = event.message_str.strip()
+        code = text
         if not code:
             yield event.plain_result("❌ 验证码不能为空")
             return
@@ -847,10 +855,15 @@ class KuwoPlugin(Star):
         if state.get('step') != 'binding':
             return
 
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='main', step=None)
+            yield event.plain_result(self._main_menu())
+            return
+
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
 
-        text = event.message_str.strip()
         parts = text.split('&')
         user_data = await self._load_data(user_id)
         new_accounts = []
@@ -897,12 +910,17 @@ class KuwoPlugin(Star):
         if state.get('step') != 'waiting_delete':
             return
 
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='main', step=None)
+            yield event.plain_result(self._main_menu())
+            return
+
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
 
-        current_text = event.message_str.strip()
         try:
-            idx = int(current_text)
+            idx = int(text)
         except:
             yield event.plain_result("❌ 请输入有效的数字")
             self._update_state(user_id, menu='main', step=None)
@@ -937,7 +955,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.1.7 版已加载")
+        logger.info("✅ 酷我插件 2.1.8 版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
