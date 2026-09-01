@@ -2,42 +2,26 @@
 # -*- coding: utf-8 -*-
 """
 酷我音乐管理插件 - AstrBot 交互式菜单
-版本: 2.0.2
-完整整合版（包含所有加密常量）
+版本: 2.0.3
 """
 import asyncio
-import json
-import os
 import time
 import re
 import base64
 import random
 import string
 import uuid
-import hashlib
-from typing import Dict, Optional, List, Tuple
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, List, Tuple
+from datetime import datetime
 
 import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
 from astrbot.api.all import *
-from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 
 # ========================== 加密常量（完整） ==========================
-SIGN_BASE = 'https://integralapi.kuwo.cn/api/v1/online/sign'
-URL_NEW_USER_SIGN_LIST = SIGN_BASE + '/v1/earningSignIn/newUserSignList'
-URL_USER_ASSET = SIGN_BASE + '/v1/earningSignIn/earningUserSignList'
-URL_NEW_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/newDoListen'
-URL_EVERYDAY_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/everydaymusic/doListen'
-URL_BOX_RENEW = SIGN_BASE + '/new/boxRenew'
-URL_NEW_BOX_LIST = SIGN_BASE + '/new/newBoxList'
-URL_NEW_BOX_FINISH = SIGN_BASE + '/new/newBoxFinish'
-FREEMIUM_SWITCH_URL = 'https://wapi.kuwo.cn/openapi/v1/user/freemium/h5/switches'
-
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
 static_e = [31, 0, 1, 2, 3, 4, -1, -1, 3, 4, 5, 6, 7, 8, -1, -1, 7, 8, 9, 10, 11, 12, -1, -1, 11, 12, 13, 14, 15, 16, -1, -1, 15, 16, 17, 18, 19, 20, -1, -1, 19, 20, 21, 22, 23, 24, -1, -1, 23, 24, 25, 26, 27, 28, -1, -1, 27, 28, 29, 30, 31, 30, -1, -1]
@@ -161,8 +145,7 @@ def generate_q(bArr, bArr2):
 def create_sx():
     timestamp = int(time.time() * 1000)
     combined_string = str(timestamp) + '12345678'
-    result = combined_string[:8]
-    return result
+    return combined_string[:8]
 
 def encrypt_devid(dev_id):
     padded_id = dev_id.ljust(16, '0')[:16]
@@ -183,23 +166,22 @@ def encrypt_phone(phone):
     if isinstance(phone, str):
         phone = phone.encode('utf-8')
     cipher = AES.new(key, AES.MODE_CBC, iv)
-    padded_plaintext = pad(phone, AES.block_size)
-    ciphertext = cipher.encrypt(padded_plaintext)
-    ciphertext_base64 = base64.b64encode(ciphertext).decode('utf-8')
-    return ciphertext_base64
+    padded = pad(phone, AES.block_size)
+    ciphertext = cipher.encrypt(padded)
+    return base64.b64encode(ciphertext).decode('utf-8')
 
 def decrypt_phone(encrypted_phone):
     key = b'ysiVkLJHHnvMWCHq'
     iv = b'ichYooX+Mb1gRetP'
-    aes = AES.new(key=key, mode=AES.MODE_CBC, iv=iv)
+    aes = AES.new(key, AES.MODE_CBC, iv)
     encrypted_data = base64.b64decode(encrypted_phone)
-    decrypted_data = unpad(aes.decrypt(encrypted_data), AES.block_size, style='pkcs7')
+    decrypted_data = unpad(aes.decrypt(encrypted_data), AES.block_size)
     return decrypted_data.decode('UTF-8')
 
 # ========================== 酷我 API 封装 ==========================
 class KuwoAPI:
     @staticmethod
-    def login(phone: str, password: str) -> Optional[Tuple[str, str, str, str]]:
+    def login(phone: str, password: str):
         try:
             q, encrypted_dev_id = get_q(phone, password)
             url = 'http://ar.i.kuwo.cn/US_NEW/kuwo/login_kw'
@@ -208,54 +190,36 @@ class KuwoAPI:
                 'Accept': '*/*',
                 'Host': 'ar.i.kuwo.cn',
                 'Connection': 'Keep-Alive',
-                'Accept-Encoding': 'gzip',
             }
             params = {'f': 'ar', 'q': q}
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            set_cookie = response.headers.get('Set-Cookie', '')
-            username_match = re.search(r'uname3=([^;]+)', set_cookie)
-            sid_match = re.search(r'websid=([^;]+)', set_cookie)
-            uid_match = re.search(r'userid=([^;]+)', set_cookie)
-            account_match = re.search(r't3kwid=([^;]+)', set_cookie)
-            if all([username_match, sid_match, uid_match, account_match]):
-                loginUid = uid_match.group(1)
-                loginSid = sid_match.group(1)
-                appUid = account_match.group(1)
-                return loginUid, loginSid, appUid, encrypted_dev_id
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            cookie = resp.headers.get('Set-Cookie', '')
+            uid = re.search(r'userid=([^;]+)', cookie)
+            sid = re.search(r'websid=([^;]+)', cookie)
+            appuid = re.search(r't3kwid=([^;]+)', cookie)
+            if uid and sid and appuid:
+                return uid.group(1), sid.group(1), appuid.group(1), encrypted_dev_id
             return None
         except Exception as e:
-            logger.error(f"登录失败 {phone}: {e}")
             return None
 
     @staticmethod
-    def send_code(loginUid: str, loginSid: str, appUid: str, encrypted_phone: str, quota_id: str) -> Tuple[bool, str]:
+    def send_code(loginUid, loginSid, appUid, encrypted_phone, quota_id):
         url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode'
         params = {
-            'loginUid': loginUid,
-            'loginSid': loginSid,
-            'mobile': encrypted_phone,
-            'appuid': appUid,
-            'apiv': '9',
-            'terminal': '1',
-            'quotaId': quota_id,
-            'type': 'blindBox',
+            'loginUid': loginUid, 'loginSid': loginSid,
+            'mobile': encrypted_phone, 'appuid': appUid,
+            'apiv': '9', 'terminal': '1', 'quotaId': quota_id, 'type': 'blindBox'
         }
         headers = {
             'Host': 'integralapi.kuwo.cn',
-            'Connection': 'keep-alive',
-            'Accept': 'application/json, text/plain, */*',
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro Build/TKQ1.221114.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/89.0.4389.72 MQQBrowser/6.2 TBS/046295 Mobile Safari/537.36/ kuwopage',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36',
+            'Accept': 'application/json',
             'Origin': 'https://h5app.kuwo.cn',
-            'X-Requested-With': 'cn.kuwo.player',
-            'Sec-Fetch-Site': 'same-site',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Dest': 'empty',
             'Referer': 'https://h5app.kuwo.cn/',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
         }
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=5, verify=False)
+            resp = requests.get(url, params=params, headers=headers, timeout=5, verify=False)
             data = resp.json()
             msg = data.get('msg', '')
             desc = data.get('data', {}).get('description', '')
@@ -266,45 +230,23 @@ class KuwoAPI:
             return False, f"异常: {e}"
 
     @staticmethod
-    def withdraw_confirm(loginUid: str, loginSid: str, appUid: str, encrypted_phone: str,
-                         code: str, kwtxid: str, verification_id: str, q36: str) -> Tuple[bool, str]:
+    def withdraw_confirm(loginUid, loginSid, appUid, encrypted_phone, code, kwtxid, verification_id, q36):
         url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw'
         params = {
-            'encry': '',
-            'type': 'highValue',
-            'quotaId': kwtxid,
-            'loginUid': loginUid,
-            'loginSid': loginSid,
-            'appuid': appUid,
-            'source': 'kwplayer_ar_12.1.4.0_meizu.apk',
-            'version': '1',
-            'phone': encrypted_phone,
-            'verificationId': verification_id,
-            'apiv': '9',
-            'code': code,
-            'platform': 'android',
-            'cliVersion': '12.1.4.0',
-            'q36': q36,
+            'loginUid': loginUid, 'loginSid': loginSid, 'appuid': appUid,
+            'phone': encrypted_phone, 'code': code, 'quotaId': kwtxid,
+            'verificationId': verification_id, 'q36': q36,
+            'type': 'highValue', 'platform': 'android', 'apiv': '9'
         }
         headers = {
             'Host': 'integralapi.kuwo.cn',
-            'Connection': 'keep-alive',
-            'sec-ch-ua-platform': '"Android"',
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro Build/TKQ1.221114.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/148.0.7778.120 Mobile Safari/537.36/ kuwopage',
-            'Accept': 'application/json, text/plain, */*',
-            'sec-ch-ua': '"Chromium";v="148", "Android WebView";v="148", "Not/A)Brand";v="99"',
-            'sec-ch-ua-mobile': '?1',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36',
+            'Accept': 'application/json',
             'Origin': 'https://h5app.kuwo.cn',
-            'X-Requested-With': 'cn.kuwo.player',
-            'Sec-Fetch-Site': 'same-site',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Dest': 'empty',
             'Referer': 'https://h5app.kuwo.cn/',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
         }
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=5, verify=False)
+            resp = requests.get(url, params=params, headers=headers, timeout=5, verify=False)
             data = resp.json() if resp.status_code == 200 else {}
             msg = data.get('msg', '')
             text = data.get('data', {}).get('text', '')
@@ -316,43 +258,33 @@ class KuwoAPI:
             return False, f"异常: {e}"
 
     @staticmethod
-    def check_withdraw_today(loginUid: str, loginSid: str) -> bool:
+    def check_withdraw_today(loginUid, loginSid):
         url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdrawDetails'
-        params = {
-            'loginUid': loginUid,
-            'loginSid': loginSid,
-            'pn': 1,
-            'rn': 10,
-        }
+        params = {'loginUid': loginUid, 'loginSid': loginSid, 'pn': 1, 'rn': 10}
         headers = {
             'Host': 'integralapi.kuwo.cn',
-            'Accept': 'application/json, text/plain, */*',
+            'User-Agent': 'Mozilla/5.0 (iPhone) AppleWebKit/605.1.15',
+            'Accept': 'application/json',
             'Origin': 'https://h5app.kuwo.cn',
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 KWMusic/12.1.2.0 DeviceModel/iPhone18,3 NetType/WIFI kuwopage',
-            'Referer': 'https://h5app.kuwo.cn/apps/earning-sign/bill.html?random=1783815372333&kwflag=2758068154_1783815205',
-            'Accept-Language': 'zh-CN,zh-Hans;q=0.9',
-            'Connection': 'keep-alive',
+            'Referer': 'https://h5app.kuwo.cn/',
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=5, verify=False)
-            if resp.status_code != 200:
-                return False
+            if resp.status_code != 200: return False
             data = resp.json()
-            if data.get('code') != 200:
-                return False
+            if data.get('code') != 200: return False
             records = data.get('data', {}).get('list', [])
-            today_str = datetime.now().strftime('%Y-%m-%d')
+            today = datetime.now().strftime('%Y-%m-%d')
             for item in records:
-                create_time = item.get('createTime', '')
-                if create_time.startswith(today_str):
+                if item.get('createTime', '').startswith(today):
                     if item.get('status') == 1 or '提现成功' in item.get('description', ''):
                         return True
             return False
-        except Exception:
+        except:
             return False
 
-# ========================== AstrBot 插件主类 ==========================
-@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理插件", "2.0.2",
+# ========================== AstrBot 插件 ==========================
+@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理插件", "2.0.3",
           "https://github.com/YourName/astrbot_plugin_kuwo")
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -368,7 +300,6 @@ class KuwoPlugin(Star):
         self.user_menu_state = {}
         self.user_last_active = {}
         self.user_waiting_input = {}
-        self.user_temp_data = {}
         self.data = {}
         self.cron_job_ids = []
 
@@ -377,14 +308,10 @@ class KuwoPlugin(Star):
         for uid in list(self.data.keys()):
             if not isinstance(self.data[uid], dict):
                 self.data[uid] = {}
-            if "accounts" not in self.data[uid]:
-                self.data[uid]["accounts"] = []
-            if "auth_limit" not in self.data[uid]:
-                self.data[uid]["auth_limit"] = self.default_auth_limit
-            if "daily_withdraw" not in self.data[uid]:
-                self.data[uid]["daily_withdraw"] = {}
-            if "verification_codes" not in self.data[uid]:
-                self.data[uid]["verification_codes"] = {}
+            self.data[uid].setdefault("accounts", [])
+            self.data[uid].setdefault("auth_limit", self.default_auth_limit)
+            self.data[uid].setdefault("daily_withdraw", {})
+            self.data[uid].setdefault("verification_codes", {})
         await self._save_data()
 
     async def _save_data(self):
@@ -443,43 +370,44 @@ class KuwoPlugin(Star):
         await self._load_data()
         yield event.plain_result(self._main_menu())
 
-    @filter.command("酷我")
-    async def kuwo_handler(self, event: AstrMessageEvent):
+    @event
+    async def on_message(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
-        if self.user_menu_state.get(user_id):
-            last = self.user_last_active.get(user_id, 0)
-            if time.time() - last > 120:
-                self.user_menu_state.pop(user_id, None)
-                self.user_last_active.pop(user_id, None)
-                self.user_waiting_input.pop(user_id, None)
-                yield event.plain_result("⏰ 操作超时，已退出菜单，请重新发送“酷我”进入。")
-                return
-            self.user_last_active[user_id] = time.time()
-        else:
+        if user_id not in self.user_menu_state:
             return
+
+        last = self.user_last_active.get(user_id, 0)
+        if time.time() - last > 120:
+            self.user_menu_state.pop(user_id, None)
+            self.user_last_active.pop(user_id, None)
+            self.user_waiting_input.pop(user_id, None)
+            yield event.plain_result("⏰ 操作超时，已退出菜单，请重新发送“酷我”进入。")
+            return
+        self.user_last_active[user_id] = time.time()
 
         text = event.message_str.strip()
         state = self.user_menu_state.get(user_id)
 
         if self.user_waiting_input.get(user_id):
-            result = await self._handle_waiting_input(user_id, text, event)
+            result = await self._handle_waiting_input(user_id, text)
             if result:
                 yield event.plain_result(result)
             return
 
         if state == 'main':
-            result = await self._handle_main_menu(user_id, text, event)
+            result = await self._handle_main_menu(user_id, text)
         elif state == 'get_code':
-            result = await self._handle_get_code_menu(user_id, text, event)
+            result = await self._handle_get_code_menu(user_id, text)
         elif state == 'withdraw':
-            result = await self._handle_withdraw_menu(user_id, text, event)
+            result = await self._handle_withdraw_menu(user_id, text)
         else:
             return
 
         if result:
             yield event.plain_result(result)
 
-    async def _handle_main_menu(self, user_id: str, text: str, event: AstrMessageEvent) -> Optional[str]:
+    # ---------- 菜单处理函数 ----------
+    async def _handle_main_menu(self, user_id: str, text: str) -> Optional[str]:
         if text == "0":
             self.user_menu_state.pop(user_id, None)
             return "👋 已退出菜单"
@@ -492,17 +420,14 @@ class KuwoPlugin(Star):
                 user_data["accounts"] = []
                 await self._save_data()
                 return "✅ 已解绑所有账号"
-            else:
-                return "❌ 您还没有绑定任何账号"
+            return "❌ 您还没有绑定任何账号"
         elif text == "3":
             user_data = self._get_user_data(user_id)
             if user_data["accounts"]:
                 lines = [f"📱 {acc['phone']}" for acc in user_data["accounts"]]
-                auth_limit = user_data["auth_limit"]
-                lines.append(f"📊 总授权次数：{auth_limit}")
+                lines.append(f"📊 总授权次数：{user_data['auth_limit']}")
                 return "📋 您绑定的账号：\n" + "\n".join(lines)
-            else:
-                return "❌ 您还没有绑定任何账号"
+            return "❌ 您还没有绑定任何账号"
         elif text == "4":
             self.user_menu_state[user_id] = 'get_code'
             return self._get_code_menu()
@@ -514,10 +439,9 @@ class KuwoPlugin(Star):
             return self._withdraw_menu()
         elif text == "8":
             return self._help_text()
-        else:
-            return "❌ 无效选项，请回复数字\n" + self._main_menu()
+        return "❌ 无效选项，请回复数字\n" + self._main_menu()
 
-    async def _handle_get_code_menu(self, user_id: str, text: str, event: AstrMessageEvent) -> Optional[str]:
+    async def _handle_get_code_menu(self, user_id: str, text: str) -> Optional[str]:
         if text == "0":
             self.user_menu_state[user_id] = 'main'
             return self._main_menu()
@@ -542,10 +466,9 @@ class KuwoPlugin(Star):
             for phone, success, info in results:
                 msg += f"{'✅' if success else '❌'} {phone}: {info}\n"
             return msg
-        else:
-            return "❌ 无效选项\n" + self._get_code_menu()
+        return "❌ 无效选项\n" + self._get_code_menu()
 
-    async def _handle_withdraw_menu(self, user_id: str, text: str, event: AstrMessageEvent) -> Optional[str]:
+    async def _handle_withdraw_menu(self, user_id: str, text: str) -> Optional[str]:
         if text == "0":
             self.user_menu_state[user_id] = 'main'
             return self._main_menu()
@@ -570,22 +493,20 @@ class KuwoPlugin(Star):
                 status = "✅ 提现成功" if success else "❌ 提现失败"
                 msg += f"{status} - {phone}：{detail}\n"
             return msg
-        else:
-            return "❌ 无效选项\n" + self._withdraw_menu()
+        return "❌ 无效选项\n" + self._withdraw_menu()
 
-    async def _handle_waiting_input(self, user_id: str, text: str, event: AstrMessageEvent) -> Optional[str]:
+    async def _handle_waiting_input(self, user_id: str, text: str) -> Optional[str]:
         wait_type = self.user_waiting_input.get(user_id)
         if wait_type == 'binding':
             parts = text.split('&')
             new_accounts = []
-            error_msgs = []
+            errors = []
             for part in parts:
                 part = part.strip()
-                if not part:
-                    continue
+                if not part: continue
                 items = part.split('#')
                 if len(items) < 2:
-                    error_msgs.append(f"❌ 格式错误: {part}")
+                    errors.append(f"❌ 格式错误: {part}")
                     continue
                 phone = items[0].strip()
                 password = items[1].strip()
@@ -593,12 +514,12 @@ class KuwoPlugin(Star):
                 if len(items) >= 3 and items[2].strip().isdigit():
                     limit = int(items[2].strip())
                 if not phone or not password:
-                    error_msgs.append(f"❌ 手机号或密码为空: {part}")
+                    errors.append(f"❌ 手机号或密码为空: {part}")
                     continue
                 new_accounts.append({"phone": phone, "password": password, "limit": limit})
-            if error_msgs:
+            if errors:
                 self.user_waiting_input.pop(user_id, None)
-                return "绑定失败：\n" + "\n".join(error_msgs) + "\n请重新发送“酷我”进入菜单重试。"
+                return "绑定失败：\n" + "\n".join(errors) + "\n请重新发送“酷我”进入菜单重试。"
             if not new_accounts:
                 return "未解析到有效账号，请重新输入"
             user_data = self._get_user_data(user_id)
@@ -607,11 +528,11 @@ class KuwoPlugin(Star):
                     if acc.get("limit") is not None:
                         user_data["auth_limit"] = acc["limit"]
                         break
-                existing_phones = {acc["phone"] for acc in user_data["accounts"]}
+                existing = {acc["phone"] for acc in user_data["accounts"]}
                 for acc in new_accounts:
-                    if acc["phone"] not in existing_phones:
+                    if acc["phone"] not in existing:
                         user_data["accounts"].append({"phone": acc["phone"], "password": acc["password"]})
-                        existing_phones.add(acc["phone"])
+                        existing.add(acc["phone"])
             else:
                 for acc in new_accounts:
                     if acc.get("limit") is not None:
@@ -632,21 +553,21 @@ class KuwoPlugin(Star):
                 await self._save_data()
                 self.user_waiting_input.pop(user_id, None)
                 return f"✅ 验证码 {code} 已缓存，有效5分钟。\n" + self._main_menu()
-            else:
-                return "❌ 您还没有绑定账号，请先绑定"
+            return "❌ 您还没有绑定账号，请先绑定"
         return None
 
+    # ---------- 核心业务 ----------
     async def _send_codes_batch(self, user_id: str, accounts: List[dict]) -> List[Tuple[str, bool, str]]:
         results = []
         login_infos = []
         for acc in accounts:
             login_result = await asyncio.to_thread(KuwoAPI.login, acc["phone"], acc["password"])
             if login_result:
-                loginUid, loginSid, appUid, encrypted_dev_id = login_result
-                login_infos.append((acc["phone"], loginUid, loginSid, appUid, encrypted_dev_id))
+                loginUid, loginSid, appUid, _ = login_result
+                login_infos.append((acc["phone"], loginUid, loginSid, appUid))
             else:
                 results.append((acc["phone"], False, "登录失败"))
-        for phone, loginUid, loginSid, appUid, _ in login_infos:
+        for phone, loginUid, loginSid, appUid in login_infos:
             encrypted_phone = encrypt_phone(phone)
             success, info = await asyncio.to_thread(KuwoAPI.send_code, loginUid, loginSid, appUid, encrypted_phone, self.kwtxid)
             results.append((phone, success, info))
@@ -686,11 +607,11 @@ class KuwoPlugin(Star):
                 await self._save_data()
         return results
 
+    # ---------- 定时任务 ----------
     async def _setup_cron(self):
         await asyncio.sleep(3)
         scheduler = getattr(self.context, 'scheduler', None)
         if scheduler is None:
-            logger.warning("当前环境不支持调度器，定时任务不可用")
             return
         try:
             job1 = scheduler.add_job(
@@ -707,41 +628,23 @@ class KuwoPlugin(Star):
                 **self._parse_cron(self.withdraw_cron)
             )
             self.cron_job_ids.append(job2.id)
-            logger.info(f"酷我插件定时任务已注册: 获取验证码 {self.verification_cron}, 提现 {self.withdraw_cron}")
         except Exception as e:
-            logger.error(f"注册定时任务失败: {e}")
+            pass
 
     def _parse_cron(self, cron_expr: str) -> dict:
         parts = cron_expr.split()
         if len(parts) == 6:
-            return {
-                'second': parts[0],
-                'minute': parts[1],
-                'hour': parts[2],
-                'day': parts[3],
-                'month': parts[4],
-                'day_of_week': parts[5]
-            }
-        elif len(parts) == 5:
-            return {
-                'minute': parts[0],
-                'hour': parts[1],
-                'day': parts[2],
-                'month': parts[3],
-                'day_of_week': parts[4]
-            }
+            return {'second': parts[0], 'minute': parts[1], 'hour': parts[2], 'day': parts[3], 'month': parts[4], 'day_of_week': parts[5]}
         else:
-            raise ValueError(f"cron表达式格式错误: {cron_expr}")
+            return {'minute': parts[0], 'hour': parts[1], 'day': parts[2], 'month': parts[3], 'day_of_week': parts[4]}
 
     async def _auto_get_verification_codes(self):
-        logger.info("执行定时获取验证码任务")
         await self._load_data()
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
         for user_id, user_data in self.data.items():
             accounts = user_data.get("accounts", [])
-            if not accounts:
-                continue
+            if not accounts: continue
             daily = user_data.get("daily_withdraw", {}).get(today, {})
             if now.hour == 23:
                 accounts_to_send = accounts
@@ -751,12 +654,10 @@ class KuwoPlugin(Star):
                 asyncio.create_task(self._send_codes_batch(user_id, accounts_to_send))
 
     async def _auto_withdraw(self):
-        logger.info("执行自动提现任务")
         await self._load_data()
         for user_id, user_data in self.data.items():
             accounts = user_data.get("accounts", [])
-            if not accounts:
-                continue
+            if not accounts: continue
             auth_limit = user_data["auth_limit"]
             if auth_limit > 0 and len(accounts) > auth_limit:
                 accounts_to_withdraw = accounts[:auth_limit]
@@ -777,4 +678,3 @@ class KuwoPlugin(Star):
                     scheduler.remove_job(job_id)
                 except:
                     pass
-        logger.info("酷我插件已卸载")
