@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.1.8 版，所有命令支持输入 0 取消）
+# 3. AstrBot 插件主类（2.1.9 版，修复绑定取消）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -717,7 +717,6 @@ class KuwoPlugin(Star):
             return
 
         text = event.message_str.strip().lower()
-        # 检查是否为取消（0）
         if text == "0":
             self._update_state(user_id, menu='verify', step=None)
             yield event.plain_result(self._verify_menu())
@@ -847,8 +846,8 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 绑定输入处理 ----------
-    @filter.regex(r'^\d{11}#.+$')
+    # ---------- 绑定输入处理（关键修复：支持 0 取消） ----------
+    @filter.regex(r'^(0|\d{11}#.+)$')
     async def handle_binding_input(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -955,7 +954,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.1.8 版已加载")
+        logger.info("✅ 酷我插件 2.1.9 版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
