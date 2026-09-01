@@ -5,12 +5,6 @@
         "default": 3,
         "hint": "提现成功扣减一次"
     },
-    "verification_cron": {
-        "description": "定时获取验证码的cron表达式",
-        "type": "string",
-        "default": "12 55 8,12,16,19 * * *",
-        "hint": "秒 分 时 日 月 周，例如：12 55 8,12,16,19 * * *"
-    },
     "verification_id": {
         "description": "验证会话ID (verificationId)",
         "type": "string",
