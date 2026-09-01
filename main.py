@@ -12,8 +12,9 @@ import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-from astrbot.api.all import *  # 包含 register, command, Star, Context, AstrMessageEvent
-from astrbot.api import logger  # 添加日志
+from astrbot.api.all import *
+from astrbot.api.event import filter
+from astrbot.api import logger
 
 # ======================================================================
 # 1. 加密常量（完整，来自酷我逆向）
@@ -281,9 +282,9 @@ class KuwoAPI:
             return False
 
 # ======================================================================
-# 3. AstrBot 插件主类（只使用 @command，重写 on_message）
+# 3. AstrBot 插件主类
 # ======================================================================
-@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.1.8", "https://github.com/YourName/astrbot_plugin_kuwo")
+@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.2.0", "https://github.com/YourName/astrbot_plugin_kuwo")
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -317,9 +318,9 @@ class KuwoPlugin(Star):
         self.states[user_id] = {'menu': 'main', 'step': None, 'last_active': time.time()}
         yield event.plain_result(self._main_menu())
 
-    # ========== 重写 on_message 处理所有非命令消息 ==========
-    async def on_message(self, event: AstrMessageEvent):
-        logger.info(f"on_message 被调用了！消息内容: {event.message_str}")
+    @filter('regex', '.*')
+    async def handle_all_messages(self, event: AstrMessageEvent):
+        logger.info(f"✅ filter 捕获到消息: {event.message_str}")
         user_id = event.get_sender_id()
         if user_id not in self.states:
             logger.info(f"用户 {user_id} 不在菜单状态，忽略")
@@ -336,7 +337,7 @@ class KuwoPlugin(Star):
         menu = state['menu']
         step = state.get('step')
 
-        logger.info(f"处理用户 {user_id} 的消息: {text}, 当前菜单: {menu}, 步骤: {step}")
+        logger.info(f"处理消息: {text}, 菜单: {menu}, 步骤: {step}")
 
         # ---- 步骤处理 ----
         if step == 'binding':
