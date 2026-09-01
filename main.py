@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（纯数字交互，KV存储）
+# 3. AstrBot 插件主类（纯数字交互，KV存储，直接列出账号）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -520,15 +520,22 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._main_menu())
 
         elif text == "4":
-            self._update_state(user_id, menu='get_code')
-            yield event.plain_result("📨 选择要发送验证码的账号：\n1️⃣ 全部账号\n2️⃣ 选择指定账号\n0️⃣ 返回主菜单")
+            # 直接列出所有绑定账号，让用户输入 all 或序号
+            user_data = await self._load_data(user_id)
+            if not user_data["accounts"]:
+                yield event.plain_result("❌ 您还没有绑定任何账号")
+                yield event.plain_result(self._main_menu())
+                return
+            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
+            prompt = "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
+            self._update_state(user_id, step='send_select', tmp_data={'accounts': user_data["accounts"]})
+            yield event.plain_result(prompt)
 
         elif text == "5":
             self._update_state(user_id, step='code_input')
             yield event.plain_result("🔢 请输入6位验证码")
 
         elif text == "6":
-            # 立即提现
             user_data = await self._load_data(user_id)
             if not user_data["accounts"]:
                 yield event.plain_result("❌ 请先绑定账号")
@@ -587,65 +594,8 @@ class KuwoPlugin(Star):
             yield event.plain_result("帮助：发送“酷我”进入菜单，回复数字操作。\n120秒无操作自动退出。")
             yield event.plain_result(self._main_menu())
 
-    # ---------- 子菜单：获取验证码 ----------
-    @filter.regex(r'^[0-2]$')
-    async def handle_get_code_choice(self, event: AstrMessageEvent):
-        user_id = event.get_sender_id()
-        state = self._get_state(user_id)
-        if state.get('menu') != 'get_code' or state.get('step'):
-            return
-
-        self._cancel_timeout(user_id)
-        self._schedule_timeout(user_id)
-
-        text = event.message_str.strip()
-        user_data = await self._load_data(user_id)
-
-        if text == "0":
-            self._update_state(user_id, menu='main')
-            yield event.plain_result(self._main_menu())
-            return
-
-        elif text == "1":
-            # 全部账号发送验证码
-            if not user_data["accounts"]:
-                yield event.plain_result("❌ 您还没有绑定任何账号")
-                self._update_state(user_id, menu='main')
-                yield event.plain_result(self._main_menu())
-                return
-
-            results = []
-            for acc in user_data["accounts"]:
-                phone = acc["phone"]
-                login = login_kuwo(phone, acc["password"])
-                if not login:
-                    results.append(f"❌ {phone}: 登录失败")
-                    continue
-                uid, sid, appuid, _ = login
-                encrypted_phone = encrypt_phone(phone)
-                if check_withdraw_today(uid, sid):
-                    results.append(f"⏭️ {phone}: 今日已提现，跳过")
-                    continue
-                success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.kwtxid)
-                results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
-
-            yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(results))
-            self._update_state(user_id, menu='main')
-            yield event.plain_result(self._main_menu())
-
-        elif text == "2":
-            # 选择指定账号
-            if not user_data["accounts"]:
-                yield event.plain_result("❌ 您还没有绑定任何账号")
-                self._update_state(user_id, menu='main')
-                yield event.plain_result(self._main_menu())
-                return
-            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
-            yield event.plain_result("请选择要发送验证码的账号序号（输入 all 发送全部）：\n" + "\n".join(lines) + "\n（发送 0 返回）")
-            self._update_state(user_id, step='send_select', tmp_data={'accounts': user_data["accounts"]})
-
-    # ---------- 处理指定账号选择 ----------
-    @filter.regex(r'^(all|\d+)$')
+    # ---------- 处理发送验证码的选择（支持 all、逗号分隔序号、0返回） ----------
+    @filter.regex(r'^(all|[\d,]+)$')
     async def handle_send_select(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -659,59 +609,64 @@ class KuwoPlugin(Star):
         accounts = state.get('tmp_data', {}).get('accounts', [])
 
         if text == "0":
-            self._update_state(user_id, menu='get_code', step=None)
-            yield event.plain_result("📨 选择要发送验证码的账号：\n1️⃣ 全部账号\n2️⃣ 选择指定账号\n0️⃣ 返回主菜单")
-            return
-
-        if text == "all":
-            # 发送全部账号的验证码
-            if not accounts:
-                yield event.plain_result("❌ 没有可发送的账号")
-                self._update_state(user_id, menu='main', step=None)
-                yield event.plain_result(self._main_menu())
-                return
-            results = []
-            for acc in accounts:
-                phone = acc["phone"]
-                login = login_kuwo(phone, acc["password"])
-                if not login:
-                    results.append(f"❌ {phone}: 登录失败")
-                    continue
-                uid, sid, appuid, _ = login
-                encrypted_phone = encrypt_phone(phone)
-                if check_withdraw_today(uid, sid):
-                    results.append(f"⏭️ {phone}: 今日已提现，跳过")
-                    continue
-                success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.kwtxid)
-                results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
-            yield event.plain_result("📨 验证码发送结果（全部账号）：\n" + "\n".join(results))
+            # 返回主菜单
             self._update_state(user_id, menu='main', step=None)
             yield event.plain_result(self._main_menu())
             return
 
-        # 处理数字序号
-        try:
-            idx = int(text) - 1
-            if idx < 0 or idx >= len(accounts):
-                yield event.plain_result("❌ 序号无效，请重新输入")
+        # 解析要发送的账号
+        phones_to_send = []
+        if text == "all":
+            phones_to_send = [acc["phone"] for acc in accounts]
+        else:
+            # 逗号分隔的序号
+            indices = text.split(',')
+            try:
+                for idx_str in indices:
+                    idx = int(idx_str.strip()) - 1
+                    if 0 <= idx < len(accounts):
+                        phones_to_send.append(accounts[idx]["phone"])
+                    else:
+                        yield event.plain_result(f"❌ 序号 {idx_str} 无效，请重新输入")
+                        return
+            except ValueError:
+                yield event.plain_result("❌ 输入格式错误，请输入数字序号（用逗号分隔）或 all")
                 return
-            phone = accounts[idx]["phone"]
-            password = accounts[idx]["password"]
+
+        if not phones_to_send:
+            yield event.plain_result("❌ 未选择任何账号")
+            self._update_state(user_id, menu='main', step=None)
+            yield event.plain_result(self._main_menu())
+            return
+
+        # 发送验证码
+        results = []
+        for phone in phones_to_send:
+            # 查找密码
+            password = None
+            for acc in accounts:
+                if acc["phone"] == phone:
+                    password = acc["password"]
+                    break
+            if not password:
+                results.append(f"❌ {phone}: 未找到密码")
+                continue
+
             login = login_kuwo(phone, password)
             if not login:
-                yield event.plain_result(f"❌ {phone}: 登录失败")
-            else:
-                uid, sid, appuid, _ = login
-                encrypted_phone = encrypt_phone(phone)
-                if check_withdraw_today(uid, sid):
-                    yield event.plain_result(f"⏭️ {phone}: 今日已提现，跳过")
-                else:
-                    success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.kwtxid)
-                    yield event.plain_result(f"{'✅' if success else '❌'} {phone}: {msg}")
-            self._update_state(user_id, menu='main', step=None)
-            yield event.plain_result(self._main_menu())
-        except ValueError:
-            yield event.plain_result("❌ 请输入有效数字或 'all'")
+                results.append(f"❌ {phone}: 登录失败")
+                continue
+            uid, sid, appuid, _ = login
+            encrypted_phone = encrypt_phone(phone)
+            if check_withdraw_today(uid, sid):
+                results.append(f"⏭️ {phone}: 今日已提现，跳过")
+                continue
+            success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.kwtxid)
+            results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
+
+        yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(results))
+        self._update_state(user_id, menu='main', step=None)
+        yield event.plain_result(self._main_menu())
 
     # ---------- 绑定输入处理 ----------
     @filter.regex(r'^\d{11}#.+$')
