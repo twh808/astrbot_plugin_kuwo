@@ -12,7 +12,9 @@ import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-from astrbot.api.all import *  # 包含 register, command, filter, Star, Context, AstrMessageEvent
+# ========== 正确导入装饰器 ==========
+from astrbot.api.all import *          # 包含 register, command, Star, Context, AstrMessageEvent
+from astrbot.api.event import filter   # 从 event 模块导入 filter 装饰器函数
 
 # =========================================================
 # 1. 加密常量（完整，来自酷我逆向）
@@ -282,7 +284,7 @@ class KuwoAPI:
 # =========================================================
 # 3. AstrBot 插件主类
 # =========================================================
-@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.1.2", "https://github.com/YourName/astrbot_plugin_kuwo")
+@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.1.3", "https://github.com/YourName/astrbot_plugin_kuwo")
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -316,7 +318,7 @@ class KuwoPlugin(Star):
         self.states[user_id] = {'menu': 'main', 'step': None, 'last_active': time.time()}
         yield event.plain_result(self._main_menu())
 
-    # 使用 filter 监听所有消息，注意传两个位置参数
+    # 使用 @filter('regex', '.*') 监听所有消息
     @filter('regex', '.*')
     async def handle_all_messages(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
