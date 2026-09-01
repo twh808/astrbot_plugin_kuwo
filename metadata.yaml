@@ -1,6 +1,6 @@
 name: astrbot_plugin_kuwo
 display_name: 酷我音乐管理
-version: "2.0.0"
+version: "2.0.3"
 desc: 酷我音乐账号绑定、验证码获取、提现管理（支持多账号、授权次数、定时任务）
 short_desc: 酷我音乐账号绑定、验证码、提现（含自动/立即执行）
 author: YourName
@@ -18,11 +18,11 @@ config:
   - name: verification_cron
     type: str
     default: "55 8,12,16,19 * * *"
-    desc: 定时获取验证码的cron表达式（分 时 日 月 周）
+    desc: 定时获取验证码的cron表达式（秒 分 时 日 月 周）
   - name: withdraw_cron
     type: str
     default: "59 8,12,16,19 * * *"
-    desc: 自动提现的cron表达式（分 时 日 月 周）
+    desc: 自动提现的cron表达式（秒 分 时 日 月 周）
   - name: verification_id
     type: str
     default: "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D"
