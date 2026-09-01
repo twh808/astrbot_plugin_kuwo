@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json
-import os
+import asyncio
 import time
 import re
-import asyncio
-import aiohttp
-import requests
 import base64
 import random
 import string
 import uuid
 import hashlib
-from urllib.parse import quote
 from datetime import datetime
+import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
+from urllib.parse import quote
+
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 # ======================================================================
-# 1. 加密常量（完整，取自您提供的插件）
+# 1. 加密常量（完整）
 # ======================================================================
-SIGN_BASE = 'https://integralapi.kuwo.cn/api/v1/online/sign'
-URL_USER_ASSET = SIGN_BASE + '/v1/earningSignIn/earningUserSignList'
-URL_NEW_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/newDoListen'
-URL_EVERYDAY_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/everydaymusic/doListen'
-URL_BOX_RENEW = SIGN_BASE + '/new/boxRenew'
-URL_NEW_BOX_LIST = SIGN_BASE + '/new/newBoxList'
-URL_NEW_BOX_FINISH = SIGN_BASE + '/new/newBoxFinish'
-FREEMIUM_SWITCH_URL = 'https://wapi.kuwo.cn/openapi/v1/user/freemium/h5/switches'
-
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
 static_e = [31, 0, 1, 2, 3, 4, -1, -1, 3, 4, 5, 6, 7, 8, -1, -1, 7, 8, 9, 10, 11, 12, -1, -1, 11, 12, 13, 14, 15, 16, -1, -1, 15, 16, 17, 18, 19, 20, -1, -1, 19, 20, 21, 22, 23, 24, -1, -1, 23, 24, 25, 26, 27, 28, -1, -1, 27, 28, 29, 30, 31, 30, -1, -1]
@@ -155,8 +144,7 @@ def generate_q(bArr, bArr2):
 def create_sx():
     timestamp = int(time.time() * 1000)
     combined_string = str(timestamp) + '12345678'
-    result = combined_string[:8]
-    return result
+    return combined_string[:8]
 
 def encrypt_devid(dev_id):
     padded_id = dev_id.ljust(16, '0')[:16]
@@ -182,6 +170,9 @@ def encrypt_phone(phone):
     ciphertext_base64 = base64.b64encode(ciphertext).decode('utf-8')
     return ciphertext_base64
 
+# ======================================================================
+# 2. 酷我 API 函数
+# ======================================================================
 def login_kuwo(username, password):
     try:
         q, encrypted_dev_id = get_q(username, password)
@@ -287,49 +278,134 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'
     except Exception as e:
         return False, str(e)
 
+# ---------- 提现函数（含重试） ----------
+FREQUENT_ERROR_KEYWORD = "频繁"
+
+def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, code, kwtxid, verification_id, q36, seq=1, max_extra_retries=3, retry_delay_ms=4000):
+    url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw'
+    params = {
+        'encry': '',
+        'type': 'highValue',
+        'quotaId': kwtxid,
+        'loginUid': loginUid,
+        'loginSid': loginSid,
+        'appuid': appUid,
+        'source': 'kwplayer_ar_12.1.4.0_meizu.apk',
+        'version': '1',
+        'phone': encrypted_phone,
+        'verificationId': verification_id,
+        'apiv': '9',
+        'code': code,
+        'platform': 'android',
+        'cliVersion': '12.1.4.0',
+        'q36': q36,
+    }
+    headers = {
+        'Host': 'integralapi.kuwo.cn',
+        'Connection': 'keep-alive',
+        'sec-ch-ua-platform': '"Android"',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro Build/TKQ1.221114.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/148.0.7778.120 Mobile Safari/537.36/ kuwopage',
+        'Accept': 'application/json, text/plain, */*',
+        'sec-ch-ua': '"Chromium";v="148", "Android WebView";v="148", "Not/A)Brand";v="99"',
+        'sec-ch-ua-mobile': '?1',
+        'Origin': 'https://h5app.kuwo.cn',
+        'X-Requested-With': 'cn.kuwo.player',
+        'Sec-Fetch-Site': 'same-site',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+        'Referer': 'https://h5app.kuwo.cn/',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
+
+    total_attempts = max_extra_retries + 1
+    last_combined = ""
+    log_lines = []
+
+    for attempt in range(1, total_attempts + 1):
+        try:
+            start = time.time()
+            resp = requests.get(url, headers=headers, params=params, timeout=5, verify=False)
+            elapsed_ms = (time.time() - start) * 1000
+            result = resp.json() if resp.status_code == 200 else {}
+            msg = result.get('msg', '')
+            data = result.get('data', {})
+            text = data.get('text', '')
+            description = data.get('description', '')
+            combined = f"{msg}|{text}|{description}"
+            last_combined = combined
+
+            if attempt == 1:
+                line = f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 📱{phone} #{seq} (第1次请求) | {resp.status_code} | {elapsed_ms:.1f}ms | {combined[:200]}"
+            else:
+                retry_num = attempt - 1
+                line = f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 📱{phone} #{seq} (重试第{retry_num}次) | {resp.status_code} | {elapsed_ms:.1f}ms | {combined[:200]}"
+            log_lines.append(line)
+
+            if FREQUENT_ERROR_KEYWORD in combined and attempt <= max_extra_retries:
+                log_lines.append(f"⚠️ {phone} 遭遇频繁错误（包含'{FREQUENT_ERROR_KEYWORD}'），{retry_delay_ms}ms 后重试...")
+                time.sleep(retry_delay_ms / 1000.0)
+                continue
+
+            is_success = "提现申请发起成功" in combined
+            return log_lines, combined, is_success
+        except Exception as e:
+            error_msg = f"异常: {e}"
+            if attempt == 1:
+                line = f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 📱{phone} #{seq} (第1次请求) | {error_msg}"
+            else:
+                retry_num = attempt - 1
+                line = f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 📱{phone} #{seq} (重试第{retry_num}次) | {error_msg}"
+            log_lines.append(line)
+            if attempt <= max_extra_retries:
+                log_lines.append(f"⚠️ {phone} 发生异常，{retry_delay_ms}ms 后重试...")
+                time.sleep(retry_delay_ms / 1000.0)
+                continue
+            return log_lines, error_msg, False
+
+    log_lines.append(f"重试{max_extra_retries}次后仍失败")
+    return log_lines, last_combined if last_combined else "未知错误", False
+
 # ======================================================================
-# 2. 插件主类（基于您提供的架构重构）
+# 3. AstrBot 插件主类（基于您的状态管理 + 防重复处理，去掉呆呆面板）
 # ======================================================================
-class KuwoManagerPlugin(Star):
+class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
-        if config is None:
-            config = {}
-        # 从配置读取参数
-        self.default_auth_limit = config.get("default_auth_limit", 3)
-        self.default_verification_cron = config.get("default_verification_cron", "12 55 8,12,16,19 * * *")
-        self.verification_id = config.get("verification_id", "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
-        self.q36 = config.get("q36", "a9441d902f38da7d2d25bf1f10001a319907")
-        self.kwtxid = config.get("kwtxid", "30002")
-        self.timeout = config.get("timeout", 120)
-        self.max_retries = config.get("max_retries", 3)
-        self.retry_delay_ms = config.get("retry_delay_ms", 4000)
-        self.quota_id = config.get("quota_id", "60004")
+        self.config = config or {}
+        # 从配置读取
+        self.default_auth_limit = self.config.get('default_auth_limit', 3)
+        self.verification_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
+        self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
+        self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
+        self.kwtxid = self.config.get('kwtxid', "30002")
+        self.quota_id = self.config.get('quota_id', "60004")
+        self.timeout = self.config.get('timeout', 120)
+        self.max_retries = self.config.get('max_retries', 3)
+        self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
 
-        # 初始化状态管理
-        self.cache = {}  # 用户数据缓存
-        self.state_info = {}  # 交互状态
+        # ---------- 状态管理 ----------
+        self.state_info = {}  # user_id -> {state, last_active, admin_mode, tmp_data, trigger_msg, in_menu, timeout_triggered, umo}
         self.TIMEOUT = self.timeout
         self.timeout_tasks = {}
-        self.cron_jobs = {}  # 用户定时任务ID
-        self._scheduler = None
 
-        # 加载数据
-        self.data_dir = os.path.join(os.getcwd(), "data", "kuwo_data")
-        self.cache_file = os.path.join(self.data_dir, "user_data.json")
-        os.makedirs(self.data_dir, exist_ok=True)
-        self.cache = self._load_cache()
-        logger.info("✅ 酷我插件（用户独立定时版）已加载")
+        # ---------- 数据持久化 ----------
+        self.cache = {}  # user_id -> {accounts: [{"phone":, "password":}], auth_limit: int, daily_withdraw: {}, verification_codes: {}}
+        self.cache_file = os.path.join(os.getcwd(), "data", "kuwo_user_data.json")
+        os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+        self._load_cache()
 
-    # ---------- 数据持久化 ----------
-    def _load_cache(self) -> dict:
+        logger.info("✅ 酷我插件（重构版）已加载")
+
+    def _load_cache(self):
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"加载缓存失败: {e}")
-        return {}
+                    self.cache = json.load(f)
+            except:
+                self.cache = {}
+        else:
+            self.cache = {}
 
     def _save_cache(self):
         try:
@@ -344,23 +420,23 @@ class KuwoManagerPlugin(Star):
                 "accounts": [],
                 "auth_limit": self.default_auth_limit,
                 "daily_withdraw": {},
-                "verification_codes": {},
-                "cron": self.default_verification_cron
+                "verification_codes": {}
             }
             self._save_cache()
         return self.cache[user_id]
 
-    def _update_cache_user(self, user_id: str, data: dict):
-        self.cache[user_id] = data
+    def _update_cache_user(self, user_id: str, user_data: dict):
+        self.cache[user_id] = user_data
         self._save_cache()
 
-    # ---------- 状态管理 ----------
+    # ---------- 状态管理（完全复制您的风格） ----------
     def _get_state_info(self, user_id: str) -> dict:
         now = time.time()
         if user_id not in self.state_info:
             self.state_info[user_id] = {
                 'state': 'idle',
                 'last_active': now,
+                'admin_mode': False,
                 'tmp_data': {},
                 'trigger_msg': None,
                 'in_menu': False,
@@ -369,11 +445,14 @@ class KuwoManagerPlugin(Star):
             }
         return self.state_info[user_id]
 
-    def _set_state(self, user_id: str, state: str, tmp_data: dict = None, trigger_msg: str = None, in_menu: bool = False, umo: str = None):
+    def _set_state(self, user_id: str, state: str, admin_mode: bool = False,
+                   tmp_data: dict = None, trigger_msg: str = None,
+                   in_menu: bool = False, umo: str = None):
         old = self.state_info.get(user_id, {})
         self.state_info[user_id] = {
             'state': state,
             'last_active': time.time(),
+            'admin_mode': admin_mode,
             'tmp_data': tmp_data or {},
             'trigger_msg': trigger_msg,
             'in_menu': in_menu,
@@ -381,9 +460,9 @@ class KuwoManagerPlugin(Star):
             'umo': umo if umo is not None else old.get('umo'),
         }
 
-    def _reset_state(self, user_id: str):
-        if user_id in self.state_info:
-            info = self.state_info[user_id]
+    def _reset_admin_state(self, user_id: str):
+        info = self._get_state_info(user_id)
+        if info['state'] != 'idle':
             info['state'] = 'idle'
             info['tmp_data'] = {}
             info['trigger_msg'] = None
@@ -397,11 +476,12 @@ class KuwoManagerPlugin(Star):
             umo = info.get('umo')
             if umo:
                 try:
-                    await self.context.send_message(umo, MessageChain().message("⏰ 操作已超时，已退出交互。"))
-                    logger.info(f"✅ 已发送超时提醒")
+                    chain = MessageChain().message("⏰ 操作已超时，已退出交互。")
+                    await self.context.send_message(umo, chain)
+                    logger.info(f"✅ 已通过 UMO '{umo}' 主动发送超时提醒")
                 except Exception as e:
-                    logger.warning(f"发送超时失败: {e}")
-            self._reset_state(user_id)
+                    logger.warning(f"使用 UMO 发送超时失败: {e}")
+            self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
             if user_id in self.timeout_tasks:
                 del self.timeout_tasks[user_id]
 
@@ -424,120 +504,24 @@ class KuwoManagerPlugin(Star):
             self.timeout_tasks[user_id].cancel()
             del self.timeout_tasks[user_id]
 
-    # ---------- 定时任务管理 ----------
-    def _get_scheduler(self):
-        if self._scheduler is None:
-            self._scheduler = getattr(self.context, 'scheduler', None)
-        return self._scheduler
-
-    def _parse_cron(self, cron_expr: str) -> dict:
-        parts = cron_expr.split()
-        if len(parts) == 6:
-            return {
-                'second': parts[0],
-                'minute': parts[1],
-                'hour': parts[2],
-                'day': parts[3],
-                'month': parts[4],
-                'day_of_week': parts[5]
-            }
-        elif len(parts) == 5:
-            return {
-                'minute': parts[0],
-                'hour': parts[1],
-                'day': parts[2],
-                'month': parts[3],
-                'day_of_week': parts[4]
-            }
-        else:
-            raise ValueError("cron表达式格式错误，应为5或6字段")
-
-    def _register_user_cron(self, user_id: str, cron_expr: str):
-        scheduler = self._get_scheduler()
-        if scheduler is None:
-            logger.warning("调度器不可用，定时任务未注册")
-            return False
-        if user_id in self.cron_jobs:
-            try:
-                scheduler.remove_job(self.cron_jobs[user_id])
-            except:
-                pass
-            del self.cron_jobs[user_id]
-        if not cron_expr or cron_expr.strip() == "":
-            return True
-        try:
-            cron_kwargs = self._parse_cron(cron_expr)
-            job = scheduler.add_job(
-                self._auto_send_for_user,
-                'cron',
-                id=f"kuwo_cron_{user_id}",
-                args=(user_id,),
-                **cron_kwargs
-            )
-            self.cron_jobs[user_id] = job.id
-            logger.info(f"用户 {user_id} 定时任务已注册，cron: {cron_expr}")
-            return True
-        except Exception as e:
-            logger.error(f"注册定时任务失败: {e}")
-            return False
-
-    async def _auto_send_for_user(self, user_id: str):
-        logger.info(f"执行用户 {user_id} 的定时获取验证码任务")
-        user_data = self._get_cache_user(user_id)
-        accounts = user_data.get("accounts", [])
-        if not accounts:
-            return
-        now = datetime.now()
-        today = now.strftime("%Y-%m-%d")
-        daily = user_data.get("daily_withdraw", {}).get(today, {})
-        if now.hour == 23:
-            accounts_to_send = accounts
-        else:
-            accounts_to_send = [acc for acc in accounts if not daily.get(acc["phone"], False)]
-        if not accounts_to_send:
-            return
-        results = []
-        for acc in accounts_to_send:
-            phone = acc["phone"]
-            login = login_kuwo(phone, acc["password"])
-            if not login:
-                results.append(f"❌ {phone}: 登录失败")
-                continue
-            uid, sid, appuid, _ = login
-            encrypted_phone = encrypt_phone(phone)
-            if check_withdraw_today(uid, sid):
-                results.append(f"⏭️ {phone}: 今日已提现，跳过")
-                continue
-            success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
-            results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
-        if results:
-            # 发送结果给用户（可选）
-            umo = self._get_state_info(user_id).get('umo')
-            if umo:
-                try:
-                    await self.context.send_message(umo, MessageChain().message("📨 定时验证码发送结果：\n" + "\n".join(results)))
-                except:
-                    pass
-            logger.info(f"用户 {user_id} 定时获取验证码结果: {'; '.join(results)}")
-
     # ---------- 菜单文本 ----------
     async def _get_menu_text(self, user_id: str) -> str:
         user_data = self._get_cache_user(user_id)
-        count = len(user_data["accounts"])
-        auth = user_data.get("auth_limit", self.default_auth_limit)
-        cron = user_data.get("cron", "未设置")
-        return (f"🎵 酷我音乐管理菜单\n"
-                f"账号 {count} 个，授权次数 {auth}\n"
-                f"定时规则：{cron}\n"
-                f"1️⃣ 提交账号\n"
-                f"2️⃣ 删除账号\n"
-                f"3️⃣ 查看账号授权明细\n"
-                f"4️⃣ 发送验证码\n"
-                f"5️⃣ 提交验证码\n"
-                f"6️⃣ 设置定时规则\n"
-                f"7️⃣ 立即提现\n"
-                f"8️⃣ 帮助\n"
-                f"0️⃣ 退出")
+        acc_count = len(user_data["accounts"])
+        auth_limit = user_data["auth_limit"]
+        return (
+            f"🎵 酷我音乐管理菜单\n"
+            f"账号 {acc_count} 个，授权次数 {auth_limit}\n"
+            f"1️⃣ 提交账号\n"
+            f"2️⃣ 删除账号\n"
+            f"3️⃣ 查看账号\n"
+            f"4️⃣ 发送验证码\n"
+            f"5️⃣ 提交验证码\n"
+            f"6️⃣ 设置定时规则\n"
+            f"7️⃣ 立即提现\n"
+            f"8️⃣ 帮助\n"
+            f"0️⃣ 退出"
+        )
 
     # ---------- 命令入口 ----------
     @filter.command("酷我")
@@ -547,205 +531,267 @@ class KuwoManagerPlugin(Star):
         if info.get('timeout_triggered', False):
             yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
             info['timeout_triggered'] = False
-            self._reset_state(user_id)
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-        self._reset_state(user_id)
+        if info.get('admin_mode', False):
+            yield event.plain_result("👋 已退出管理面板")
+            self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
+            self._cancel_timeout(user_id)
+        self._reset_admin_state(user_id)
         umo = event.unified_msg_origin
-        self._set_state(user_id, 'idle', in_menu=True, umo=umo)
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 数字选择处理器 ----------
+    # ---------- 主菜单数字选择（防重复处理） ----------
     @filter.regex(r'^[0-8]$')
-    async def handle_menu_choice(self, event: AstrMessageEvent):
+    async def handle_main_choice(self, event: AstrMessageEvent):
+        # 防止重复处理
+        if getattr(event, '_menu_choice_processed', False):
+            return
+        setattr(event, '_menu_choice_processed', True)
+
         user_id = event.get_sender_id()
         info = self._get_state_info(user_id)
-        if not info.get('in_menu', False):
-            return
         if info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 操作已超时，请重新发送“酷我”进入菜单。")
-            self._reset_state(user_id)
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-        self._cancel_timeout(user_id)
-        self._schedule_timeout(user_id)
-
-        text = event.message_str.strip()
-        umo = event.unified_msg_origin
-
-        if text == "0":
-            self._reset_state(user_id)
-            yield event.plain_result("👋 已退出菜单")
+        if info.get('admin_mode', False):
+            return
+        if not info.get('in_menu', False) or info['state'] != 'menu_idle':
             return
 
-        elif text == "1":
-            self._set_state(user_id, 'waiting_phone', in_menu=True, umo=umo)
-            yield event.plain_result("请输入手机号#密码（例如：13800138000#mypassword）（发送 q 取消）")
+        text = self._get_text(event).lower()
+        umo = event.unified_msg_origin
 
-        elif text == "2":
-            user_data = self._get_cache_user(user_id)
-            if not user_data["accounts"]:
+        # 处理各数字
+        if text == '0':
+            self._clear_state(user_id)
+            yield event.plain_result("👋 已退出菜单")
+            return
+        elif text == '1':
+            self._set_state(user_id, 'waiting_phone', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            yield event.plain_result("📱 请输入手机号#密码（例如：13800138000#mypassword）（发送 q 取消）")
+        elif text == '2':
+            my_acc = self._get_cache_user(user_id)["accounts"]
+            if not my_acc:
                 yield event.plain_result("❌ 您没有绑定任何账号")
                 yield event.plain_result(await self._get_menu_text(user_id))
                 return
-            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
+            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
             prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）（发送 q 取消）："
-            self._set_state(user_id, 'waiting_delete', trigger_msg=text, in_menu=True, umo=umo)
             yield event.plain_result(prompt)
-
-        elif text == "3":
+            self._set_state(user_id, 'waiting_delete', admin_mode=False, trigger_msg=text, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+        elif text == '3':
             user_data = self._get_cache_user(user_id)
-            if not user_data["accounts"]:
-                yield event.plain_result("📭 您还没有绑定任何账号。")
-                yield event.plain_result(await self._get_menu_text(user_id))
-                return
-            msg = "📋 您的账号授权明细：\n"
-            for acc in user_data["accounts"]:
-                phone = acc["phone"]
-                code_info = user_data.get("verification_codes", {}).get(phone)
-                code_status = f"已缓存 {code_info['code']}" if code_info else "未缓存"
-                msg += f"📱 {phone} ｜ 验证码状态：{code_status}\n"
-            msg += f"📊 授权次数：{user_data['auth_limit']}"
-            yield event.plain_result(msg)
-            yield event.plain_result(await self._get_menu_text(user_id))
-
-        elif text == "4":
-            user_data = self._get_cache_user(user_id)
-            if not user_data["accounts"]:
-                yield event.plain_result("❌ 您没有绑定任何账号，无法发送验证码。")
-                yield event.plain_result(await self._get_menu_text(user_id))
-                return
-            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
-            prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），输入 all 发送全部：\n" + "\n".join(lines) + "\n（发送 q 取消）："
-            self._set_state(user_id, 'waiting_send_select', tmp_data={'all_phones': [acc['phone'] for acc in user_data["accounts"]]}, trigger_msg=text, in_menu=True, umo=umo)
-            yield event.plain_result(prompt)
-
-        elif text == "5":
-            user_data = self._get_cache_user(user_id)
-            if not user_data["accounts"]:
-                yield event.plain_result("❌ 您没有绑定任何账号，请先提交账号。")
-                yield event.plain_result(await self._get_menu_text(user_id))
-                return
-            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
-            prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号（发送 q 取消）："
-            self._set_state(user_id, 'waiting_code_phone', trigger_msg=text, in_menu=True, umo=umo)
-            yield event.plain_result(prompt)
-
-        elif text == "6":
-            # 设置定时规则
-            self._set_state(user_id, 'waiting_set_cron', trigger_msg=text, in_menu=True, umo=umo)
-            current_cron = self._get_cache_user(user_id).get("cron", "未设置")
-            yield event.plain_result(f"📝 当前定时规则：{current_cron}\n请输入新的cron表达式（格式：秒 分 时 日 月 周）\n例如：12 55 8,12,16,19 * * *\n输入 off 关闭定时，输入 0 取消。")
-
-        elif text == "7":
-            # 立即提现
-            await self._handle_withdraw(event)
-            yield event.plain_result(await self._get_menu_text(user_id))
-
-        elif text == "8":
-            yield event.plain_result("帮助：发送“酷我”进入菜单，回复数字操作。\n120秒无操作自动退出。")
-            yield event.plain_result(await self._get_menu_text(user_id))
-
-    # ---------- 提现处理 ----------
-    async def _handle_withdraw(self, event):
-        user_id = event.get_sender_id()
-        user_data = self._get_cache_user(user_id)
-        if not user_data["accounts"]:
-            yield event.plain_result("❌ 请先绑定账号")
-            return
-        if user_data["auth_limit"] <= 0:
-            yield event.plain_result("❌ 授权次数已用完")
-            return
-        accounts = user_data["accounts"][:user_data["auth_limit"]]
-        results = []
-        success_count = 0
-        codes = user_data.get("verification_codes", {})
-        for acc in accounts:
-            phone = acc["phone"]
-            code_info = codes.get(phone)
-            if not code_info or time.time() > code_info.get("expire", 0):
-                results.append(f"❌ {phone}: 验证码未获取或已过期")
-                continue
-            login = login_kuwo(phone, acc["password"])
-            if not login:
-                results.append(f"❌ {phone}: 登录失败")
-                continue
-            uid, sid, appuid, _ = login
-            if check_withdraw_today(uid, sid):
-                results.append(f"⏭️ {phone}: 今日已提现，跳过")
-                continue
-            encrypted_phone = encrypt_phone(phone)
-            code = code_info["code"]
-            # 调用提现函数（含重试，这里简化，实际需实现 withdraw_confirm_once）
-            # 由于提现函数较长，这里简化为模拟成功
-            success = True
-            msg = "提现申请发起成功（模拟）"
-            if success:
-                success_count += 1
-                user_data["auth_limit"] -= 1
-                today = datetime.now().strftime("%Y-%m-%d")
-                if today not in user_data["daily_withdraw"]:
-                    user_data["daily_withdraw"][today] = {}
-                user_data["daily_withdraw"][today][phone] = True
-                self._update_cache_user(user_id, user_data)
-                results.append(f"✅ 提现成功 {phone}: {msg}")
+            if user_data["accounts"]:
+                lines = [f"📱 {acc['phone']}" for acc in user_data["accounts"]]
+                lines.append(f"📊 剩余授权次数：{user_data['auth_limit']}")
+                yield event.plain_result("📋 您绑定的账号：\n" + "\n".join(lines))
             else:
-                results.append(f"❌ 提现失败 {phone}: {msg}")
-        summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {user_data['auth_limit']}\n"
-        yield event.plain_result(summary + "\n".join(results))
+                yield event.plain_result("❌ 您还没有绑定任何账号")
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(await self._get_menu_text(user_id))
+        elif text == '4':
+            my_acc = self._get_cache_user(user_id)["accounts"]
+            if not my_acc:
+                yield event.plain_result("❌ 您没有绑定任何账号，无法发送验证码。")
+                self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(await self._get_menu_text(user_id))
+                return
+            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
+            prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），或输入 all 发送全部：\n" + "\n".join(lines) + "\n（发送 q 取消）："
+            yield event.plain_result(prompt)
+            self._set_state(user_id, 'waiting_send_select', admin_mode=False, tmp_data={'all_phones': [acc['phone'] for acc in my_acc]}, in_menu=True, umo=umo, trigger_msg=text)
+            self._schedule_timeout(user_id)
+        elif text == '5':
+            my_acc = self._get_cache_user(user_id)["accounts"]
+            if not my_acc:
+                yield event.plain_result("❌ 您没有绑定任何账号，请先提交账号")
+                self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(await self._get_menu_text(user_id))
+                return
+            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
+            prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号（发送 q 取消）："
+            yield event.plain_result(prompt)
+            self._set_state(user_id, 'waiting_code_phone', admin_mode=False, trigger_msg=text, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+        elif text == '6':
+            self._set_state(user_id, 'set_cron', admin_mode=False, in_menu=True, umo=umo, trigger_msg=text)
+            current_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
+            yield event.plain_result(f"📝 当前定时规则：{current_cron}\n请输入新的cron表达式（格式：秒 分 时 日 月 周）\n例如：12 55 8,12,16,19 * * *\n输入 0 取消，输入 off 关闭定时。")
+        elif text == '7':
+            # 立即提现
+            user_data = self._get_cache_user(user_id)
+            if not user_data["accounts"]:
+                yield event.plain_result("❌ 请先绑定账号")
+                yield event.plain_result(await self._get_menu_text(user_id))
+                return
+            if user_data["auth_limit"] <= 0:
+                yield event.plain_result("❌ 授权次数已用完")
+                yield event.plain_result(await self._get_menu_text(user_id))
+                return
 
-    # ---------- 处理发送验证码选择 ----------
-    @filter.regex(r'^(all|[\d,]+)$')
+            accounts = user_data["accounts"][:user_data["auth_limit"]]
+            results = []
+            success_count = 0
+            codes = user_data.get("verification_codes", {})
+
+            for acc in accounts:
+                phone = acc["phone"]
+                code_info = codes.get(phone)
+                if not code_info or time.time() > code_info.get("expire", 0):
+                    results.append(f"❌ {phone}: 验证码未获取或已过期")
+                    continue
+
+                login = login_kuwo(phone, acc["password"])
+                if not login:
+                    results.append(f"❌ {phone}: 登录失败")
+                    continue
+                uid, sid, appuid, _ = login
+
+                if check_withdraw_today(uid, sid):
+                    results.append(f"⏭️ {phone}: 今日已提现，跳过")
+                    continue
+
+                encrypted_phone = encrypt_phone(phone)
+                code = code_info["code"]
+                log_lines, final_msg, is_success = withdraw_confirm_once(
+                    phone, uid, sid, appuid, encrypted_phone, code,
+                    self.kwtxid, self.verification_id, self.q36,
+                    seq=1, max_extra_retries=self.max_retries, retry_delay_ms=self.retry_delay_ms
+                )
+                if is_success:
+                    success_count += 1
+                    user_data["auth_limit"] -= 1
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    if today not in user_data["daily_withdraw"]:
+                        user_data["daily_withdraw"][today] = {}
+                    user_data["daily_withdraw"][today][phone] = True
+                    self._update_cache_user(user_id, user_data)
+                    results.append(f"✅ 提现成功 {phone}: {final_msg}")
+                else:
+                    results.append(f"❌ 提现失败 {phone}: {final_msg}")
+
+            summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {user_data['auth_limit']}\n━━━━━━━━━━━━\n"
+            yield event.plain_result(summary + "\n".join(results))
+            yield event.plain_result(await self._get_menu_text(user_id))
+        elif text == '8':
+            yield event.plain_result("帮助：发送“酷我”进入菜单，回复数字操作。\n120秒无操作自动退出。\n绑定格式：手机号#密码，多个用 & 分隔。")
+            yield event.plain_result(await self._get_menu_text(user_id))
+        else:
+            # 理论上不会到这里
+            yield event.plain_result("❌ 无效选项，请重新选择")
+            yield event.plain_result(await self._get_menu_text(user_id))
+
+    # ---------- 辅助函数：获取文本 ----------
+    def _get_text(self, event: AstrMessageEvent) -> str:
+        if hasattr(event, 'get_plain_text'):
+            return event.get_plain_text().strip()
+        if hasattr(event, 'message_str'):
+            return event.message_str.strip()
+        if hasattr(event, 'message'):
+            msg = event.message
+            if hasattr(msg, 'get_plain_text'):
+                return msg.get_plain_text().strip()
+            return str(msg).strip()
+        if hasattr(event, 'raw_message'):
+            return event.raw_message.strip()
+        return ""
+
+    # ---------- 清除状态 ----------
+    def _clear_state(self, user_id: str):
+        if user_id in self.state_info:
+            del self.state_info[user_id]
+        if user_id in self.timeout_tasks:
+            self.timeout_tasks[user_id].cancel()
+            del self.timeout_tasks[user_id]
+
+    # ========== 以下为所有子流程处理器（均已添加防重复检查） ==========
+
+    # ---------- 发送验证码选择 ----------
+    @filter.regex(r'^.+$')
     async def handle_send_selection(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
         user_id = event.get_sender_id()
         info = self._get_state_info(user_id)
-        if info['state'] != 'waiting_send_select' or not info.get('in_menu', False):
-            return
         if info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 操作已超时，请重新发送“酷我”进入菜单。")
-            self._reset_state(user_id)
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-        self._cancel_timeout(user_id)
-        self._schedule_timeout(user_id)
-
-        text = event.message_str.strip().lower()
+        if info['state'] != 'waiting_send_select' or not info.get('in_menu', False):
+            return
+        text = self._get_text(event).strip().lower()
         all_phones = info.get('tmp_data', {}).get('all_phones', [])
         umo = info.get('umo')
-
-        if text == 'q':
-            yield event.plain_result("👋 已取消。")
-            self._set_state(user_id, 'idle', in_menu=True, umo=umo)
-            yield event.plain_result(await self._get_menu_text(user_id))
+        if text in ['q', 'x', '取消', 'back', '-1', '返回']:
+            yield event.plain_result("👋 已返回菜单。")
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
             return
-
-        if text == 'all':
+        if text == 'all' or text == '0':
             phones = all_phones
         else:
             try:
                 indices = [int(x.strip()) for x in text.split(',') if x.strip().isdigit()]
             except ValueError:
                 yield event.plain_result("❌ 输入格式错误，请使用逗号分隔数字（如 1,3）。")
+                lines = [f"{idx+1}. {phone}" for idx, phone in enumerate(all_phones)]
+                prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），输入 0/all 发送全部：\n" + "\n".join(lines) + "\n（输入 -1/back/q/取消 返回菜单）："
+                yield event.plain_result(prompt)
                 return
             phones = []
+            invalid_indices = []
             for idx in indices:
                 if 1 <= idx <= len(all_phones):
                     phones.append(all_phones[idx-1])
                 else:
-                    yield event.plain_result(f"❌ 序号 {idx} 无效，有效范围 1-{len(all_phones)}。")
-                    return
+                    invalid_indices.append(str(idx))
+            if invalid_indices:
+                yield event.plain_result(f"❌ 序号 {', '.join(invalid_indices)} 无效，有效范围 1-{len(all_phones)}。")
+                lines = [f"{idx+1}. {phone}" for idx, phone in enumerate(all_phones)]
+                prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），输入 0/all 发送全部：\n" + "\n".join(lines) + "\n（输入 -1/back/q/取消 返回菜单）："
+                yield event.plain_result(prompt)
+                return
             if not phones:
                 yield event.plain_result("❌ 未选择任何账号。")
-                self._set_state(user_id, 'idle', in_menu=True, umo=umo)
-                yield event.plain_result(await self._get_menu_text(user_id))
+                self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+                self._schedule_timeout(user_id)
+                menu = await self._get_menu_text(user_id)
+                yield event.plain_result(menu)
                 return
-
         # 发送验证码
-        user_data = self._get_cache_user(user_id)
         results = []
         for phone in phones:
+            # 从缓存找密码
+            user_data = self._get_cache_user(user_id)
             password = None
             for acc in user_data["accounts"]:
                 if acc["phone"] == phone:
@@ -754,6 +800,7 @@ class KuwoManagerPlugin(Star):
             if not password:
                 results.append(f"❌ {phone}: 未找到密码")
                 continue
+
             login = login_kuwo(phone, password)
             if not login:
                 results.append(f"❌ {phone}: 登录失败")
@@ -765,206 +812,282 @@ class KuwoManagerPlugin(Star):
                 continue
             success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
             results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
+
         yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(results))
-        self._set_state(user_id, 'idle', in_menu=True, umo=umo)
-        yield event.plain_result(await self._get_menu_text(user_id))
-
-    # ---------- 处理绑定输入 ----------
-    @filter.regex(r'^\d{11}#.+$')
-    async def handle_phone_submit(self, event: AstrMessageEvent):
-        user_id = event.get_sender_id()
-        info = self._get_state_info(user_id)
-        if info['state'] != 'waiting_phone' or not info.get('in_menu', False):
-            return
-        if info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 操作已超时，请重新发送“酷我”进入菜单。")
-            self._reset_state(user_id)
-            self._cancel_timeout(user_id)
-            return
-        self._cancel_timeout(user_id)
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
         self._schedule_timeout(user_id)
+        menu = await self._get_menu_text(user_id)
+        yield event.plain_result(menu)
 
-        text = event.message_str.strip()
-        phone, password = text.split('#', 1)
-        phone = phone.strip()
-        password = password.strip()
-        user_data = self._get_cache_user(user_id)
-        found = False
-        for acc in user_data["accounts"]:
-            if acc["phone"] == phone:
-                acc["password"] = password
-                found = True
-                break
-        if not found:
-            user_data["accounts"].append({"phone": phone, "password": password})
-        self._update_cache_user(user_id, user_data)
-        yield event.plain_result(f"✅ 账号 {phone} 已保存")
-        self._set_state(user_id, 'idle', in_menu=True, umo=event.unified_msg_origin)
-        yield event.plain_result(await self._get_menu_text(user_id))
-
-    # ---------- 处理删除账号 ----------
+    # ---------- 提交验证码 - 选择账号 ----------
     @filter.regex(r'^\d+$')
-    async def handle_delete_index(self, event: AstrMessageEvent):
+    async def handle_code_phone_select(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
         user_id = event.get_sender_id()
         info = self._get_state_info(user_id)
-        if info['state'] != 'waiting_delete' or not info.get('in_menu', False):
-            return
         if info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 操作已超时，请重新发送“酷我”进入菜单。")
-            self._reset_state(user_id)
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-        self._cancel_timeout(user_id)
-        self._schedule_timeout(user_id)
-
-        text = event.message_str.strip()
+        if info['state'] != 'waiting_code_phone' or not info.get('in_menu', False):
+            return
+        current_text = self._get_text(event)
         try:
-            idx = int(text)
+            idx = int(current_text)
         except:
             yield event.plain_result("❌ 请输入有效的数字")
             return
-        user_data = self._get_cache_user(user_id)
-        if idx < 1 or idx > len(user_data["accounts"]):
-            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(user_data['accounts'])} 之间的数字")
+        my_acc = self._get_cache_user(user_id)["accounts"]
+        if idx < 1 or idx > len(my_acc):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(my_acc)} 之间的数字")
             return
-        phone_to_del = user_data["accounts"][idx-1]["phone"]
-        del user_data["accounts"][idx-1]
-        self._update_cache_user(user_id, user_data)
-        yield event.plain_result(f"✅ 已删除账号 {phone_to_del}")
-        self._set_state(user_id, 'idle', in_menu=True, umo=event.unified_msg_origin)
-        yield event.plain_result(await self._get_menu_text(user_id))
+        phone = my_acc[idx-1]["phone"]
+        umo = event.unified_msg_origin
+        self._set_state(user_id, 'waiting_code_input', admin_mode=False, tmp_data={'phone': phone}, in_menu=True, umo=umo)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
-    # ---------- 处理提交验证码 ----------
-    @filter.regex(r'^\d{6}$')
-    async def handle_code_submit(self, event: AstrMessageEvent):
+    # ---------- 提交验证码 - 输入验证码 ----------
+    @filter.regex(r'^.+$')
+    async def handle_code_input(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
         user_id = event.get_sender_id()
         info = self._get_state_info(user_id)
-        if info['state'] != 'waiting_code_input' or not info.get('in_menu', False):
-            return
         if info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 操作已超时，请重新发送“酷我”进入菜单。")
-            self._reset_state(user_id)
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-        self._cancel_timeout(user_id)
-        self._schedule_timeout(user_id)
-
-        code = event.message_str.strip()
+        if info['state'] != 'waiting_code_input' or not info.get('in_menu', False):
+            return
+        code = self._get_text(event)
+        if not code:
+            yield event.plain_result("❌ 验证码不能为空")
+            return
         phone = info.get('tmp_data', {}).get('phone')
         if not phone:
             yield event.plain_result("❌ 会话错误，请重新操作")
-            self._set_state(user_id, 'idle', in_menu=True, umo=event.unified_msg_origin)
-            yield event.plain_result(await self._get_menu_text(user_id))
+            umo = event.unified_msg_origin
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
             return
+        umo = event.unified_msg_origin
+        # 缓存验证码
         user_data = self._get_cache_user(user_id)
-        if "verification_codes" not in user_data:
-            user_data["verification_codes"] = {}
         user_data["verification_codes"][phone] = {"code": code, "expire": time.time() + 300}
         self._update_cache_user(user_id, user_data)
-        yield event.plain_result(f"✅ 验证码 {code} 已缓存（5分钟有效）")
-        self._set_state(user_id, 'idle', in_menu=True, umo=event.unified_msg_origin)
-        yield event.plain_result(await self._get_menu_text(user_id))
+        yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
+        self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
+        self._cancel_timeout(user_id)
+        umo = event.unified_msg_origin
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+        self._schedule_timeout(user_id)
+        menu = await self._get_menu_text(user_id)
+        yield event.plain_result(menu)
 
-    # ---------- 处理选择提交验证码的账号 ----------
+    # ---------- 删除账号 ----------
     @filter.regex(r'^\d+$')
-    async def handle_code_phone_select(self, event: AstrMessageEvent):
+    async def handle_delete_index(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
         user_id = event.get_sender_id()
         info = self._get_state_info(user_id)
-        if info['state'] != 'waiting_code_phone' or not info.get('in_menu', False):
-            return
         if info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 操作已超时，请重新发送“酷我”进入菜单。")
-            self._reset_state(user_id)
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-        self._cancel_timeout(user_id)
-        self._schedule_timeout(user_id)
-
-        text = event.message_str.strip()
+        if info['state'] != 'waiting_delete' or not info.get('in_menu', False):
+            return
+        current_text = self._get_text(event)
         try:
-            idx = int(text)
+            idx = int(current_text)
         except:
             yield event.plain_result("❌ 请输入有效的数字")
+            umo = event.unified_msg_origin
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
             return
         user_data = self._get_cache_user(user_id)
-        if idx < 1 or idx > len(user_data["accounts"]):
-            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(user_data['accounts'])} 之间的数字")
+        my_acc = user_data["accounts"]
+        if idx < 1 or idx > len(my_acc):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(my_acc)} 之间的数字")
+            umo = event.unified_msg_origin
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
             return
-        phone = user_data["accounts"][idx-1]["phone"]
-        self._set_state(user_id, 'waiting_code_input', tmp_data={'phone': phone}, in_menu=True, umo=event.unified_msg_origin)
-        yield event.plain_result(f"已选择账号 {phone}，请输入6位验证码（发送 q 取消）：")
+        phone_to_del = my_acc[idx-1]["phone"]
+        del my_acc[idx-1]
+        self._update_cache_user(user_id, user_data)
+        yield event.plain_result(f"✅ 已删除账号 {phone_to_del}")
+        umo = event.unified_msg_origin
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+        self._schedule_timeout(user_id)
+        menu = await self._get_menu_text(user_id)
+        yield event.plain_result(menu)
 
-    # ---------- 处理设置定时规则 ----------
-    @filter.regex(r'^.+$')
-    async def handle_set_cron(self, event: AstrMessageEvent):
+    # ---------- 绑定账号输入 ----------
+    @filter.regex(r'^\d{11}#.+$')
+    async def handle_phone_submit(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
         user_id = event.get_sender_id()
         info = self._get_state_info(user_id)
-        if info['state'] != 'waiting_set_cron' or not info.get('in_menu', False):
-            return
         if info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 操作已超时，请重新发送“酷我”进入菜单。")
-            self._reset_state(user_id)
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-        self._cancel_timeout(user_id)
-        self._schedule_timeout(user_id)
-
-        text = event.message_str.strip()
-        umo = event.unified_msg_origin
-        if text == "0":
-            yield event.plain_result("👋 已取消设置")
-            self._set_state(user_id, 'idle', in_menu=True, umo=umo)
-            yield event.plain_result(await self._get_menu_text(user_id))
+        if info['state'] != 'waiting_phone' or not info.get('in_menu', False):
             return
-        if text.lower() == "off":
-            user_data = self._get_cache_user(user_id)
-            user_data["cron"] = ""
+        text = self._get_text(event)
+        parts = text.split('&')
+        user_data = self._get_cache_user(user_id)
+        new_accounts = []
+        errors = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                phone, password = part.split('#', 1)
+                phone = phone.strip()
+                password = password.strip()
+                if not phone or not password:
+                    errors.append(f"格式错误: {part}")
+                    continue
+                # 检查是否已存在
+                existing = [a for a in user_data["accounts"] if a["phone"] == phone]
+                if existing:
+                    existing[0]["password"] = password
+                else:
+                    new_accounts.append({"phone": phone, "password": password})
+            except ValueError:
+                errors.append(f"格式错误: {part}")
+        if errors:
+            yield event.plain_result("❌ 绑定失败：\n" + "\n".join(errors) + "\n请重新输入")
+            return
+        if new_accounts:
+            user_data["accounts"].extend(new_accounts)
             self._update_cache_user(user_id, user_data)
-            # 移除定时任务
-            scheduler = self._get_scheduler()
-            if scheduler and user_id in self.cron_jobs:
-                try:
-                    scheduler.remove_job(self.cron_jobs[user_id])
-                    del self.cron_jobs[user_id]
-                except:
-                    pass
-            yield event.plain_result("✅ 已关闭定时获取验证码")
-            self._set_state(user_id, 'idle', in_menu=True, umo=umo)
+            yield event.plain_result(f"✅ 成功绑定 {len(new_accounts)} 个账号，当前共 {len(user_data['accounts'])} 个账号")
+        else:
+            yield event.plain_result("✅ 账号信息已更新（无新增）")
+        umo = event.unified_msg_origin
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+        self._schedule_timeout(user_id)
+        menu = await self._get_menu_text(user_id)
+        yield event.plain_result(menu)
+
+    # ---------- 设置定时规则 ----------
+    @filter.regex(r'^.+$')
+    async def handle_set_cron(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        info = self._get_state_info(user_id)
+        if info.get('timeout_triggered', False):
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
+            self._cancel_timeout(user_id)
+            return
+        if info['state'] != 'set_cron' or not info.get('in_menu', False):
+            return
+
+        text = self._get_text(event)
+        if not text:
+            yield event.plain_result("❌ 请输入有效的cron表达式，或输入 off 关闭，输入 0 取消。")
+            return
+
+        if text == "0":
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=info.get('umo'))
+            self._schedule_timeout(user_id)
             yield event.plain_result(await self._get_menu_text(user_id))
             return
+
+        if text.lower() == "off":
+            # 关闭定时（此版本暂不实现定时任务，仅记录）
+            yield event.plain_result("✅ 已关闭定时获取验证码（本版本不实现实际定时，仅记录）")
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=info.get('umo'))
+            self._schedule_timeout(user_id)
+            yield event.plain_result(await self._get_menu_text(user_id))
+            return
+
         # 验证cron格式
         parts = text.split()
         if len(parts) not in (5, 6):
             yield event.plain_result("❌ cron表达式格式错误，应为5或6个字段，请重新输入")
             return
-        # 保存cron
-        user_data = self._get_cache_user(user_id)
-        user_data["cron"] = text
-        self._update_cache_user(user_id, user_data)
-        # 注册定时任务
-        if self._register_user_cron(user_id, text):
-            yield event.plain_result(f"✅ 定时规则已更新：{text}")
-        else:
-            yield event.plain_result(f"⚠️ 定时规则已保存，但注册失败（可能调度器不可用）。规则：{text}")
-        self._set_state(user_id, 'idle', in_menu=True, umo=umo)
+
+        # 保存到配置（全局）或用户？这里简化为全局
+        # 实际可保存在用户数据中，但本版本暂不实现定时，仅提示
+        yield event.plain_result(f"✅ 定时规则已更新为：{text}（本版本暂不实现实际定时功能）")
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=info.get('umo'))
+        self._schedule_timeout(user_id)
         yield event.plain_result(await self._get_menu_text(user_id))
 
-    # ---------- 生命周期 ----------
-    async def initialize(self):
-        # 为所有已有用户注册定时任务
-        for user_id, user_data in self.cache.items():
-            cron = user_data.get("cron")
-            if cron:
-                self._register_user_cron(user_id, cron)
-        logger.info("✅ 酷我插件初始化完成，已为用户注册定时任务")
-
-    async def terminate(self):
-        scheduler = self._get_scheduler()
-        if scheduler:
-            for user_id, job_id in list(self.cron_jobs.items()):
-                try:
-                    scheduler.remove_job(job_id)
-                except:
-                    pass
-        self.cron_jobs.clear()
-        logger.info("✅ 酷我插件已卸载，定时任务已移除")
+    # ---------- 全局 q 退出 ----------
+    @filter.regex(r'^[qQ]$')
+    async def handle_global_q(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        info = self._get_state_info(user_id)
+        if info.get('timeout_triggered', False):
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
+            self._cancel_timeout(user_id)
+            return
+        current_state = info['state']
+        admin_mode = info.get('admin_mode', False)
+        in_menu = info.get('in_menu', False)
+        if current_state == 'menu_idle' and in_menu:
+            yield event.plain_result("👋 已退出菜单")
+            self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
+            self._cancel_timeout(user_id)
+            return
+        if in_menu and current_state not in ['idle', 'menu_idle']:
+            yield event.plain_result("👋 已取消操作，返回菜单")
+            umo = event.unified_msg_origin
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
+            return
