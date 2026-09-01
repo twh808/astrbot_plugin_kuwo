@@ -171,7 +171,7 @@ def encrypt_phone(phone):
     return ciphertext_base64
 
 # ======================================================================
-# 2. 酷我 API 函数（登录、发送验证码、检查今日提现、提现）
+# 2. 酷我 API 函数
 # ======================================================================
 def login_kuwo(username, password):
     try:
@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（纯数字交互，KV存储，直接列出账号）
+# 3. AstrBot 插件主类
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -520,7 +520,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._main_menu())
 
         elif text == "4":
-            # 直接列出所有绑定账号，让用户输入 all 或序号
             user_data = await self._load_data(user_id)
             if not user_data["accounts"]:
                 yield event.plain_result("❌ 您还没有绑定任何账号")
@@ -528,8 +527,10 @@ class KuwoPlugin(Star):
                 return
             lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
             prompt = "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
-            self._update_state(user_id, step='send_select', tmp_data={'accounts': user_data["accounts"]})
+            # 记录触发消息，防止同一消息被重复处理
+            self._update_state(user_id, step='send_select', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
             yield event.plain_result(prompt)
+            return  # 阻止消息继续传播，但 AstrBot 可能仍会传给其他 handler，我们在 handle_send_select 中加保护
 
         elif text == "5":
             self._update_state(user_id, step='code_input')
@@ -602,11 +603,16 @@ class KuwoPlugin(Star):
         if state.get('step') != 'send_select':
             return
 
+        text = event.message_str.strip().lower()
+        tmp = state.get('tmp_data', {})
+        # 如果当前消息与触发进入此状态的消息相同，则忽略（防止重复处理同一消息）
+        if text == tmp.get('trigger_msg'):
+            return
+
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
 
-        text = event.message_str.strip().lower()
-        accounts = state.get('tmp_data', {}).get('accounts', [])
+        accounts = tmp.get('accounts', [])
 
         if text == "0":
             # 返回主菜单
