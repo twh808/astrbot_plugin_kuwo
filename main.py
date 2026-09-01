@@ -236,7 +236,7 @@ def check_withdraw_today(loginUid, loginSid):
     except Exception:
         return False
 
-def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'):
+def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id):
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode'
     params = {
         'loginUid': loginUid,
@@ -367,21 +367,25 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（增加定时获取，所有配置从 metadata.yaml 读取）
+# 3. AstrBot 插件主类（从 _conf_schema.json 读取配置）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
-        # 从配置读取所有参数
+        # 从配置读取所有参数（对应 _conf_schema.json 中的 key）
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
         self.verification_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
+        self.timeout = self.config.get('timeout', 120)
+        self.max_retries = self.config.get('max_retries', 3)
+        self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
+        self.quota_id = self.config.get('quota_id', "60004")
 
         self.states = {}
-        self.TIMEOUT = 120
+        self.TIMEOUT = self.timeout
         self.timeout_tasks = {}
         self.cron_job_id = None
 
@@ -531,7 +535,7 @@ class KuwoPlugin(Star):
                 if check_withdraw_today(uid, sid):
                     results.append(f"⏭️ {phone}: 今日已提现，跳过")
                     continue
-                success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.kwtxid)
+                success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
                 results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
             if results:
                 logger.info(f"用户 {user_id} 定时获取验证码结果: {'; '.join(results)}")
@@ -655,7 +659,8 @@ class KuwoPlugin(Star):
                 code = code_info["code"]
                 log_lines, final_msg, is_success = withdraw_confirm_once(
                     phone, uid, sid, appuid, encrypted_phone, code,
-                    self.kwtxid, self.verification_id, self.q36
+                    self.kwtxid, self.verification_id, self.q36,
+                    seq=1, max_extra_retries=self.max_retries, retry_delay_ms=self.retry_delay_ms
                 )
                 if is_success:
                     success_count += 1
@@ -778,7 +783,7 @@ class KuwoPlugin(Star):
             if check_withdraw_today(uid, sid):
                 results.append(f"⏭️ {phone}: 今日已提现，跳过")
                 continue
-            success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.kwtxid)
+            success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
             results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
 
         yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(results))
@@ -866,7 +871,7 @@ class KuwoPlugin(Star):
     async def initialize(self):
         self._register_verification_cron()
         await self._load_data("dummy")
-        logger.info("✅ 酷我插件初始化完成")
+        logger.info("✅ 酷我插件初始化完成（配置已从 _conf_schema.json 加载）")
 
     async def terminate(self):
         scheduler = getattr(self.context, 'scheduler', None)
