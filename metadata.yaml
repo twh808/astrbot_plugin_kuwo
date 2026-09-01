@@ -1,29 +1,8 @@
 name: astrbot_plugin_kuwo
-display_name: 酷我音乐管理
-version: "2.0.4"
+display_name: 酷我提现
+version: "2.0.5"
 desc: 酷我音乐账号绑定、验证码、提现（支持定时获取验证码）
-short_desc: 酷我音乐管理（定时验证码版）
+short_desc: 酷我提现（配置完整版）
 author: YourName
 repo: https://github.com/YourName/astrbot_plugin_kuwo
 astrbot_version: ">=4.0.0"
-config:
-  - name: default_auth_limit
-    type: int
-    default: 3
-    desc: 默认每个用户的授权次数
-  - name: verification_cron
-    type: str
-    default: "12 55 8,12,16,19 * * *"
-    desc: 定时获取验证码的cron表达式（秒 分 时 日 月 周）
-  - name: verification_id
-    type: str
-    default: "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D"
-    desc: 提现接口所需的verificationId
-  - name: q36
-    type: str
-    default: "a9441d902f38da7d2d25bf1f10001a319907"
-    desc: 设备指纹q36
-  - name: kwtxid
-    type: str
-    default: "30002"
-    desc: 配额ID
