@@ -377,7 +377,7 @@ class KuwoPlugin(Star):
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
-        self.states = {}  # 用户状态
+        self.states = {}
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
@@ -425,7 +425,6 @@ class KuwoPlugin(Star):
             del self.timeout_tasks[user_id]
 
     def _cancel_timeout(self, user_id: str):
-        """取消用户的超时任务"""
         if user_id in self.timeout_tasks:
             self.timeout_tasks[user_id].cancel()
             del self.timeout_tasks[user_id]
@@ -521,7 +520,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._main_menu())
 
         elif text == "4":
-            # 进入获取验证码子菜单
             self._update_state(user_id, menu='get_code')
             yield event.plain_result("📨 选择要发送验证码的账号：\n1️⃣ 全部账号\n2️⃣ 选择指定账号\n0️⃣ 返回主菜单")
 
@@ -541,7 +539,6 @@ class KuwoPlugin(Star):
                 yield event.plain_result(self._main_menu())
                 return
 
-            # 取前 auth_limit 个账号
             accounts = user_data["accounts"][:user_data["auth_limit"]]
             results = []
             success_count = 0
@@ -560,7 +557,6 @@ class KuwoPlugin(Star):
                     continue
                 uid, sid, appuid, _ = login
 
-                # 检查今日是否已提现
                 if check_withdraw_today(uid, sid):
                     results.append(f"⏭️ {phone}: 今日已提现，跳过")
                     continue
@@ -645,11 +641,11 @@ class KuwoPlugin(Star):
                 yield event.plain_result(self._main_menu())
                 return
             lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
-            yield event.plain_result("请选择要发送验证码的账号序号：\n" + "\n".join(lines) + "\n（发送 0 返回）")
+            yield event.plain_result("请选择要发送验证码的账号序号（输入 all 发送全部）：\n" + "\n".join(lines) + "\n（发送 0 返回）")
             self._update_state(user_id, step='send_select', tmp_data={'accounts': user_data["accounts"]})
 
     # ---------- 处理指定账号选择 ----------
-    @filter.regex(r'^\d+$')
+    @filter.regex(r'^(all|\d+)$')
     async def handle_send_select(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -659,15 +655,43 @@ class KuwoPlugin(Star):
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
 
-        text = event.message_str.strip()
+        text = event.message_str.strip().lower()
+        accounts = state.get('tmp_data', {}).get('accounts', [])
+
         if text == "0":
             self._update_state(user_id, menu='get_code', step=None)
             yield event.plain_result("📨 选择要发送验证码的账号：\n1️⃣ 全部账号\n2️⃣ 选择指定账号\n0️⃣ 返回主菜单")
             return
 
+        if text == "all":
+            # 发送全部账号的验证码
+            if not accounts:
+                yield event.plain_result("❌ 没有可发送的账号")
+                self._update_state(user_id, menu='main', step=None)
+                yield event.plain_result(self._main_menu())
+                return
+            results = []
+            for acc in accounts:
+                phone = acc["phone"]
+                login = login_kuwo(phone, acc["password"])
+                if not login:
+                    results.append(f"❌ {phone}: 登录失败")
+                    continue
+                uid, sid, appuid, _ = login
+                encrypted_phone = encrypt_phone(phone)
+                if check_withdraw_today(uid, sid):
+                    results.append(f"⏭️ {phone}: 今日已提现，跳过")
+                    continue
+                success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.kwtxid)
+                results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
+            yield event.plain_result("📨 验证码发送结果（全部账号）：\n" + "\n".join(results))
+            self._update_state(user_id, menu='main', step=None)
+            yield event.plain_result(self._main_menu())
+            return
+
+        # 处理数字序号
         try:
             idx = int(text) - 1
-            accounts = state.get('tmp_data', {}).get('accounts', [])
             if idx < 0 or idx >= len(accounts):
                 yield event.plain_result("❌ 序号无效，请重新输入")
                 return
@@ -687,7 +711,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='main', step=None)
             yield event.plain_result(self._main_menu())
         except ValueError:
-            yield event.plain_result("❌ 请输入有效数字")
+            yield event.plain_result("❌ 请输入有效数字或 'all'")
 
     # ---------- 绑定输入处理 ----------
     @filter.regex(r'^\d{11}#.+$')
@@ -701,7 +725,6 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
 
         text = event.message_str.strip()
-        # 支持多个账号，用 & 分隔
         parts = text.split('&')
         user_data = await self._load_data(user_id)
         new_accounts = []
@@ -718,7 +741,6 @@ class KuwoPlugin(Star):
                 if not phone or not password:
                     errors.append(f"格式错误: {part}")
                     continue
-                # 检查是否已有该手机号
                 existing = [a for a in user_data["accounts"] if a["phone"] == phone]
                 if existing:
                     existing[0]["password"] = password
