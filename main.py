@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.1.5 版，使用 @filter.command 处理定时设置）
+# 3. AstrBot 插件主类（2.1.7 版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -471,7 +471,7 @@ class KuwoPlugin(Star):
             "3️⃣ 查看账号\n"
             "4️⃣ 获取验证码\n"
             "5️⃣ 提交验证码\n"
-            "6️⃣ 设置定时规则（使用命令：定时设置 <cron表达式>）\n"
+            "6️⃣ 设置定时规则\n"
             "7️⃣ 立即提现\n"
             "8️⃣ 帮助\n"
             "0️⃣ 退出"
@@ -482,7 +482,7 @@ class KuwoPlugin(Star):
             "📨 获取验证码\n"
             "1️⃣ 立即获取\n"
             "2️⃣ 定时获取（默认12 55 8,12,16,19 * * *）\n"
-            "3️⃣ 设置定时规则（使用命令：定时设置 <cron表达式>）\n"
+            "3️⃣ 设置定时规则\n"
             "0️⃣ 返回主菜单"
         )
 
@@ -494,41 +494,9 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 设置定时规则的命令 ----------
-    @filter.command("定时设置")
-    async def set_cron_command(self, event: AstrMessageEvent):
-        """设置定时获取验证码的cron表达式，用法：定时设置 <cron表达式> 或 定时设置 off"""
-        args = event.message_str.strip().split()
-        if len(args) < 2:
-            yield event.plain_result("❌ 用法：定时设置 <cron表达式> 或 定时设置 off\n例如：定时设置 12 55 8,12,16,19 * * *")
-            return
-
-        cron_expr = ' '.join(args[1:])
-        user_id = event.get_sender_id()
-
-        if cron_expr.lower() == "off":
-            user_data = await self._load_data(user_id)
-            user_data["cron"] = ""
-            await self._save_data(user_id, user_data)
-            yield event.plain_result("✅ 已关闭定时获取验证码")
-            return
-
-        # 验证cron格式（字段数）
-        parts = cron_expr.split()
-        if len(parts) not in (5, 6):
-            yield event.plain_result("❌ cron表达式格式错误，应为5或6个字段，请重新输入")
-            return
-
-        user_data = await self._load_data(user_id)
-        user_data["cron"] = cron_expr
-        await self._save_data(user_id, user_data)
-
-        yield event.plain_result(f"✅ 定时规则已更新：{cron_expr}")
-
     # ---------- 主菜单数字选择 ----------
     @filter.regex(r'^[0-8]$')
     async def handle_main_choice(self, event: AstrMessageEvent):
-        # 防止与后续 ^\d+$ 重复匹配（此版本中已无冲突，保留以防万一）
         if getattr(event, '_menu_choice_processed', False):
             return
         setattr(event, '_menu_choice_processed', True)
@@ -590,15 +558,15 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"]})
 
         elif text == "6":
-            # 提示使用命令
-            yield event.plain_result("📝 请使用命令：定时设置 <cron表达式>\n例如：定时设置 12 55 8,12,16,19 * * *\n或输入 定时设置 off 关闭定时")
-            yield event.plain_result(self._main_menu())
+            # 进入验证码子菜单（与 4 相同）
+            self._update_state(user_id, menu='verify', step=None)
+            yield event.plain_result(self._verify_menu())
 
         elif text == "7":
             await self._do_withdraw(user_id, event)
 
         elif text == "8":
-            yield event.plain_result("帮助：发送“酷我”进入菜单，回复数字操作。\n设置定时规则请使用命令：定时设置 <cron表达式>\n120秒无操作自动退出。")
+            yield event.plain_result("帮助：发送“酷我”进入菜单，回复数字操作。\n120秒无操作自动退出。")
             yield event.plain_result(self._main_menu())
 
     # ---------- 提现逻辑 ----------
@@ -686,10 +654,50 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._main_menu())
 
         elif text == "3":
-            # 提示使用命令
-            yield event.plain_result("📝 请使用命令：定时设置 <cron表达式>\n例如：定时设置 12 55 8,12,16,19 * * *\n或输入 定时设置 off 关闭定时")
+            # 进入设置定时规则状态
+            self._update_state(user_id, step='set_cron')
+            current_cron = (await self._load_data(user_id)).get("cron", "未设置")
+            yield event.plain_result(f"📝 当前定时规则：{current_cron}\n请输入新的cron表达式（格式：秒 分 时 日 月 周）\n例如：12 55 8,12,16,19 * * *\n输入 0 取消，输入 off 关闭定时。")
+
+    # ---------- 设置定时规则输入处理 ----------
+    @filter.regex(r'^(\d+\s+.*|off|0)$')
+    async def handle_set_cron_input(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'set_cron':
+            return
+
+        text = event.message_str.strip().lower()
+        self._cancel_timeout(user_id)
+        self._schedule_timeout(user_id)
+
+        if text == "0":
             self._update_state(user_id, menu='main', step=None)
             yield event.plain_result(self._main_menu())
+            return
+
+        if text == "off":
+            user_data = await self._load_data(user_id)
+            user_data["cron"] = ""
+            await self._save_data(user_id, user_data)
+            yield event.plain_result("✅ 已关闭定时获取验证码")
+            self._update_state(user_id, menu='main', step=None)
+            yield event.plain_result(self._main_menu())
+            return
+
+        # 验证cron格式
+        parts = text.split()
+        if len(parts) not in (5, 6):
+            yield event.plain_result("❌ cron表达式格式错误，应为5或6个字段，请重新输入")
+            return
+
+        user_data = await self._load_data(user_id)
+        user_data["cron"] = text
+        await self._save_data(user_id, user_data)
+
+        yield event.plain_result(f"✅ 定时规则已更新：{text}")
+        self._update_state(user_id, menu='main', step=None)
+        yield event.plain_result(self._main_menu())
 
     # ---------- 发送验证码 ----------
     async def _do_send_code(self, user_id: str, event: AstrMessageEvent):
@@ -929,7 +937,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.1.5 版已加载")
+        logger.info("✅ 酷我插件 2.1.7 版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
