@@ -1,8 +1,8 @@
 name: astrbot_plugin_kuwo
-display_name: 酷我提现
+display_name: 酷我音乐管理
 version: "2.0.5"
 desc: 酷我音乐账号绑定、验证码、提现（支持定时获取验证码）
-short_desc: 酷我提现（配置完整版）
+short_desc: 酷我音乐管理（配置完整版）
 author: YourName
 repo: https://github.com/YourName/astrbot_plugin_kuwo
 astrbot_version: ">=4.0.0"
