@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.1.2 修复版 - 纯KV存储）
+# 3. AstrBot 插件主类（2.1.3 修复版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -387,12 +387,8 @@ class KuwoPlugin(Star):
         self.states = {}
         self.TIMEOUT = self.timeout
         self.timeout_tasks = {}
-        # 用户定时任务管理: {user_id: job_id}（此版本暂不实现实际定时）
         self.cron_jobs = {}
         self._scheduler = None
-
-        # ---------- 数据持久化（KV存储） ----------
-        self.cache = {}  # 实际使用 KV
 
     # ---------- 数据持久化 ----------
     async def _load_data(self, user_id: str) -> dict:
@@ -499,10 +495,10 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 纯数字交互核心（修复：进入子流程前设置防重标志） ----------
+    # ---------- 主菜单数字选择（仅主菜单使用防重标志） ----------
     @filter.regex(r'^[0-8]$')
     async def handle_main_choice(self, event: AstrMessageEvent):
-        # 防止重复处理
+        # 防止与后续 ^\d+$ 重复匹配
         if getattr(event, '_menu_choice_processed', False):
             return
         setattr(event, '_menu_choice_processed', True)
@@ -530,12 +526,14 @@ class KuwoPlugin(Star):
         elif text == "2":
             user_data = await self._load_data(user_id)
             if user_data["accounts"]:
-                user_data["accounts"] = []
-                await self._save_data(user_id, user_data)
-                yield event.plain_result("✅ 已解绑所有账号")
+                # 进入删除选择
+                lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
+                prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）（发送 q 取消）："
+                yield event.plain_result(prompt)
+                self._update_state(user_id, step='waiting_delete', tmp_data={'accounts': user_data["accounts"]})
             else:
                 yield event.plain_result("❌ 您还没有绑定任何账号")
-            yield event.plain_result(self._main_menu())
+                yield event.plain_result(self._main_menu())
 
         elif text == "3":
             user_data = await self._load_data(user_id)
@@ -562,17 +560,14 @@ class KuwoPlugin(Star):
             lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
             prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号（发送 q 取消）："
             yield event.plain_result(prompt)
-            # 进入等待选择账号状态，并记录触发消息用于防重
-            self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
+            self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"]})
 
         elif text == "6":
-            # 设置定时规则
-            self._update_state(user_id, step='set_cron', tmp_data={'trigger_msg': text})
+            self._update_state(user_id, step='set_cron')
             current_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
             yield event.plain_result(f"📝 当前定时规则：{current_cron}\n请输入新的cron表达式（格式：秒 分 时 日 月 周）\n例如：12 55 8,12,16,19 * * *\n输入 0 取消，输入 off 关闭定时。")
 
         elif text == "7":
-            # 立即提现
             await self._do_withdraw(user_id, event)
 
         elif text == "8":
@@ -639,10 +634,7 @@ class KuwoPlugin(Star):
     # ---------- 验证码子菜单 ----------
     @filter.regex(r'^[0-3]$')
     async def handle_verify_choice(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-        setattr(event, '_menu_choice_processed', True)
-
+        # 不检查 _menu_choice_processed，因为子菜单数字不会与主菜单冲突
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('menu') != 'verify' or state.get('step'):
@@ -658,11 +650,9 @@ class KuwoPlugin(Star):
             return
 
         elif text == "1":
-            # 立即获取
             await self._do_send_code(user_id, event)
 
         elif text == "2":
-            # 定时获取（此版本暂不实现实际定时）
             user_data = await self._load_data(user_id)
             cron = user_data.get("cron", self.verification_cron)
             yield event.plain_result(f"⏰ 定时获取已配置（{cron}），但本版本暂不实现实际定时功能，请使用立即获取。")
@@ -671,7 +661,7 @@ class KuwoPlugin(Star):
 
         elif text == "3":
             # 设置定时规则
-            self._update_state(user_id, step='set_cron', tmp_data={'trigger_msg': text})
+            self._update_state(user_id, step='set_cron')
             current_cron = (await self._load_data(user_id)).get("cron", "未设置")
             yield event.plain_result(f"📝 当前定时规则：{current_cron}\n请输入新的cron表达式（格式：秒 分 时 日 月 周）\n例如：12 55 8,12,16,19 * * *\n输入 0 取消，输入 off 关闭定时。")
 
@@ -685,34 +675,26 @@ class KuwoPlugin(Star):
             return
         lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
         prompt = "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
-        # 进入等待发送选择状态
-        self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
+        self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': user_data["accounts"]})
         yield event.plain_result(prompt)
 
     # ---------- 设置定时规则输入 ----------
     @filter.regex(r'^.+$')
     async def handle_set_cron(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-        # 不在这里设置标志，因为需要接收用户输入
-
+        # 不检查 _menu_choice_processed
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'set_cron':
             return
 
         text = event.message_str.strip()
-        tmp = state.get('tmp_data', {})
-        # 忽略与触发消息相同的消息（即刚发送的数字）
-        if text == tmp.get('trigger_msg'):
+        # 忽略空输入
+        if not text:
+            yield event.plain_result("❌ 请输入有效的cron表达式，或输入 off 关闭，输入 0 取消。")
             return
 
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
-
-        if not text:
-            yield event.plain_result("❌ 请输入有效的cron表达式，或输入 off 关闭，输入 0 取消。")
-            return
 
         if text == "0":
             self._update_state(user_id, menu='verify', step=None)
@@ -744,24 +726,19 @@ class KuwoPlugin(Star):
     # ---------- 处理发送验证码的选择（支持 all、逗号分隔序号） ----------
     @filter.regex(r'^(all|[\d,]+)$')
     async def handle_send_select(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_send_select':
             return
 
         text = event.message_str.strip().lower()
-        tmp = state.get('tmp_data', {})
-        # 忽略触发消息
-        if text == tmp.get('trigger_msg'):
-            return
+        # 忽略触发消息（如果数字被主菜单捕获并设置了标志，但此步骤中不会）
+        # 但可能空，不处理
 
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
 
-        accounts = tmp.get('accounts', [])
+        accounts = state.get('tmp_data', {}).get('accounts', [])
 
         if text == "0":
             self._update_state(user_id, menu='verify', step=None)
@@ -818,19 +795,16 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 提交验证码 - 选择账号（修复：检查防重标志） ----------
+    # ---------- 提交验证码 - 选择账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
-        # 如果已由其他处理器处理，则忽略
-        if getattr(event, '_menu_choice_processed', False):
-            return
-
+        # 只处理等待选择状态，不检查 _menu_choice_processed
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_code_phone':
             return
 
-        # 检查是否在等待发送选择状态（如果是则忽略）
+        # 如果是在发送验证码的选择状态（waiting_send_select），忽略
         if state.get('step') == 'waiting_send_select':
             return
 
@@ -856,9 +830,6 @@ class KuwoPlugin(Star):
     # ---------- 提交验证码 - 输入验证码 ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_code_input':
@@ -890,9 +861,6 @@ class KuwoPlugin(Star):
     # ---------- 绑定输入处理 ----------
     @filter.regex(r'^\d{11}#.+$')
     async def handle_binding_input(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'binding':
@@ -943,9 +911,6 @@ class KuwoPlugin(Star):
     # ---------- 删除账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_delete':
@@ -963,25 +928,20 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._main_menu())
             return
 
-        user_data = await self._load_data(user_id)
-        if idx < 1 or idx > len(user_data["accounts"]):
-            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(user_data['accounts'])} 之间的数字")
+        accounts = state.get('tmp_data', {}).get('accounts', [])
+        if idx < 1 or idx > len(accounts):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(accounts)} 之间的数字")
             return
 
-        phone_to_del = user_data["accounts"][idx-1]["phone"]
-        del user_data["accounts"][idx-1]
+        user_data = await self._load_data(user_id)
+        phone_to_del = accounts[idx-1]["phone"]
+        # 从用户数据中删除
+        user_data["accounts"] = [acc for acc in user_data["accounts"] if acc["phone"] != phone_to_del]
         await self._save_data(user_id, user_data)
 
         yield event.plain_result(f"✅ 已删除账号 {phone_to_del}")
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
-
-    # ---------- 删除账号（等待选择） ----------
-    @filter.regex(r'^\d+$')
-    async def handle_delete_select(self, event: AstrMessageEvent):
-        # 此方法由 handle_main_choice 的 '2' 分支触发
-        # 但由于有共同的正则，需要特殊处理
-        pass
 
     # ---------- 全局 q 退出 ----------
     @filter.regex(r'^[qQ]$')
@@ -997,7 +957,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.1.2 修复版已加载")
+        logger.info("✅ 酷我插件 2.1.3 修复版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
