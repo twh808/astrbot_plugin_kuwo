@@ -1,65 +1,67 @@
-[
-  {
-    "key": "default_auth_limit",
-    "type": "number",
-    "default": 3,
-    "label": "默认授权次数",
-    "description": "每个用户默认的授权次数（提现成功扣减）"
-  },
-  {
-    "key": "verification_cron",
-    "type": "string",
-    "default": "12 55 8,12,16,19 * * *",
-    "label": "定时获取验证码 Cron",
-    "description": "定时获取验证码的cron表达式（秒 分 时 日 月 周）"
-  },
-  {
-    "key": "verification_id",
-    "type": "string",
-    "default": "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D",
-    "label": "验证会话ID (verificationId)",
-    "description": "提现接口所需的 verificationId"
-  },
-  {
-    "key": "q36",
-    "type": "string",
-    "default": "a9441d902f38da7d2d25bf1f10001a319907",
-    "label": "设备指纹 (q36)",
-    "description": "提现接口所需的设备指纹"
-  },
-  {
-    "key": "kwtxid",
-    "type": "string",
-    "default": "30002",
-    "label": "配额ID (kwtxid)",
-    "description": "提现接口所需的配额ID"
-  },
-  {
-    "key": "timeout",
-    "type": "number",
-    "default": 120,
-    "label": "交互超时时间（秒）",
-    "description": "菜单交互无操作超时时间"
-  },
-  {
-    "key": "max_retries",
-    "type": "number",
-    "default": 3,
-    "label": "提现最大重试次数",
-    "description": "提现遇到'频繁'错误时的最大重试次数"
-  },
-  {
-    "key": "retry_delay_ms",
-    "type": "number",
-    "default": 4000,
-    "label": "提现重试延迟（毫秒）",
-    "description": "提现重试间隔时间（毫秒）"
-  },
-  {
-    "key": "quota_id",
-    "type": "string",
-    "default": "60004",
-    "label": "验证码配额ID",
-    "description": "发送验证码时使用的配额ID"
-  }
-]
+{
+  "config": [
+    {
+      "key": "default_auth_limit",
+      "type": "number",
+      "default": 3,
+      "label": "默认授权次数",
+      "description": "每个用户默认的授权次数（提现成功扣减）"
+    },
+    {
+      "key": "verification_cron",
+      "type": "string",
+      "default": "12 55 8,12,16,19 * * *",
+      "label": "定时获取验证码 Cron",
+      "description": "定时获取验证码的cron表达式（秒 分 时 日 月 周）"
+    },
+    {
+      "key": "verification_id",
+      "type": "string",
+      "default": "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D",
+      "label": "验证会话ID (verificationId)",
+      "description": "提现接口所需的 verificationId"
+    },
+    {
+      "key": "q36",
+      "type": "string",
+      "default": "a9441d902f38da7d2d25bf1f10001a319907",
+      "label": "设备指纹 (q36)",
+      "description": "提现接口所需的设备指纹"
+    },
+    {
+      "key": "kwtxid",
+      "type": "string",
+      "default": "30002",
+      "label": "配额ID (kwtxid)",
+      "description": "提现接口所需的配额ID"
+    },
+    {
+      "key": "timeout",
+      "type": "number",
+      "default": 120,
+      "label": "交互超时时间（秒）",
+      "description": "菜单交互无操作超时时间"
+    },
+    {
+      "key": "max_retries",
+      "type": "number",
+      "default": 3,
+      "label": "提现最大重试次数",
+      "description": "提现遇到'频繁'错误时的最大重试次数"
+    },
+    {
+      "key": "retry_delay_ms",
+      "type": "number",
+      "default": 4000,
+      "label": "提现重试延迟（毫秒）",
+      "description": "提现重试间隔时间（毫秒）"
+    },
+    {
+      "key": "quota_id",
+      "type": "string",
+      "default": "60004",
+      "label": "验证码配额ID",
+      "description": "发送验证码时使用的配额ID"
+    }
+  ]
+}
