@@ -12,12 +12,10 @@ import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-# ========== 正确导入装饰器 ==========
-from astrbot.api import event          # 用于 @event 装饰器
-from astrbot.api.all import *          # command, register, Star, Context, AstrMessageEvent
+from astrbot.api.all import *   # 只需这一行，包含 command, register, Star, Context, AstrMessageEvent
 
 # ======================================================================
-# 1. 加密常量（完整，来自酷我逆向，无任何省略）
+# 1. 加密常量（完整，来自酷我逆向）
 # ======================================================================
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
@@ -282,9 +280,9 @@ class KuwoAPI:
             return False
 
 # ======================================================================
-# 3. AstrBot 插件主类
+# 3. AstrBot 插件主类（只有 @command，其他用 on_message）
 # ======================================================================
-@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.1.5", "https://github.com/YourName/astrbot_plugin_kuwo")
+@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理", "1.1.6", "https://github.com/YourName/astrbot_plugin_kuwo")
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -318,8 +316,7 @@ class KuwoPlugin(Star):
         self.states[user_id] = {'menu': 'main', 'step': None, 'last_active': time.time()}
         yield event.plain_result(self._main_menu())
 
-    # ========== 使用 @event 监听所有消息 ==========
-    @event
+    # ========== 重写 on_message 处理所有非命令消息 ==========
     async def on_message(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         if user_id not in self.states:
