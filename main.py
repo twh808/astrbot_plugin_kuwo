@@ -401,11 +401,10 @@ class KuwoPlugin(Star):
                 "auth_limit": self.default_auth_limit,
                 "daily_withdraw": {},
                 "verification_codes": {},
-                "cron": self.default_verification_cron   # 用户自定义cron，默认为全局默认
+                "cron": self.default_verification_cron
             }
             await self.put_kv_data("kuwo_data", data)
         else:
-            # 向后兼容，如果已有数据没有cron字段，添加默认
             if "cron" not in data[user_id]:
                 data[user_id]["cron"] = self.default_verification_cron
                 await self.put_kv_data("kuwo_data", data)
@@ -445,13 +444,11 @@ class KuwoPlugin(Star):
         return self._scheduler
 
     def _register_user_cron(self, user_id: str, cron_expr: str):
-        """注册或更新单个用户的定时任务"""
         scheduler = self._get_scheduler()
         if scheduler is None:
             logger.warning("调度器不可用，无法注册定时任务")
             return False
 
-        # 移除旧任务
         if user_id in self.cron_jobs:
             try:
                 scheduler.remove_job(self.cron_jobs[user_id])
@@ -459,7 +456,6 @@ class KuwoPlugin(Star):
                 pass
             del self.cron_jobs[user_id]
 
-        # 如果cron_expr为空或无效，则不注册
         if not cron_expr or cron_expr.strip() == "":
             logger.info(f"用户 {user_id} 未设置定时规则，已移除定时任务")
             return True
@@ -481,7 +477,6 @@ class KuwoPlugin(Star):
             return False
 
     async def _auto_send_for_user(self, user_id: str):
-        """为单个用户执行定时获取验证码"""
         logger.info(f"执行用户 {user_id} 的定时获取验证码任务")
         user_data = await self._load_data(user_id)
         accounts = user_data.get("accounts", [])
@@ -511,12 +506,9 @@ class KuwoPlugin(Star):
             success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
             results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
         if results:
-            # 将结果发送给用户（可选）
-            umo = user_data.get("umo")  # 可能没有存储，可以尝试从context获取，但这里简单记录日志
             logger.info(f"用户 {user_id} 定时获取验证码结果: {'; '.join(results)}")
 
     def _remove_user_cron(self, user_id: str):
-        """移除用户的定时任务"""
         scheduler = self._get_scheduler()
         if scheduler and user_id in self.cron_jobs:
             try:
@@ -598,7 +590,7 @@ class KuwoPlugin(Star):
         return (
             "📨 获取验证码\n"
             "1️⃣ 立即获取\n"
-            "2️⃣ 定时获取（使用当前设置的规则）\n"
+            "2️⃣ 定时获取（默认12 55 8,12,16,19 * * *）\n"
             "3️⃣ 设置定时规则\n"
             "0️⃣ 返回主菜单"
         )
@@ -639,7 +631,6 @@ class KuwoPlugin(Star):
             if user_data["accounts"]:
                 user_data["accounts"] = []
                 await self._save_data(user_id, user_data)
-                # 解绑后，移除定时任务（因为没有账号了，但也可以保留，任务会检测无账号跳过）
                 yield event.plain_result("✅ 已解绑所有账号")
             else:
                 yield event.plain_result("❌ 您还没有绑定任何账号")
@@ -743,7 +734,6 @@ class KuwoPlugin(Star):
             return
 
         elif text == "1":
-            # 立即获取
             user_data = await self._load_data(user_id)
             if not user_data["accounts"]:
                 yield event.plain_result("❌ 您还没有绑定任何账号")
@@ -756,20 +746,17 @@ class KuwoPlugin(Star):
             yield event.plain_result(prompt)
 
         elif text == "2":
-            # 定时获取（使用当前cron，立即执行一次）
             user_data = await self._load_data(user_id)
             cron = user_data.get("cron")
             if not cron:
                 yield event.plain_result("❌ 您尚未设置定时规则，请先设置（选项3）")
                 return
-            # 立即执行一次
             await self._auto_send_for_user(user_id)
             yield event.plain_result(f"⏰ 已按您的定时规则（{cron}）执行获取验证码，请查看结果。")
             self._update_state(user_id, menu='main', step=None)
             yield event.plain_result(self._main_menu())
 
         elif text == "3":
-            # 设置定时规则
             self._update_state(user_id, step='set_cron')
             current_cron = (await self._load_data(user_id)).get("cron", "未设置")
             yield event.plain_result(f"📝 当前定时规则：{current_cron}\n请输入新的cron表达式（格式：秒 分 时 日 月 周）\n例如：12 55 8,12,16,19 * * *\n输入 0 取消，输入 off 关闭定时。")
@@ -786,13 +773,16 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
 
         text = event.message_str.strip()
+        if not text:
+            yield event.plain_result("❌ 请输入有效的cron表达式，或输入 off 关闭，输入 0 取消。")
+            return
+
         if text == "0":
             self._update_state(user_id, menu='verify', step=None)
             yield event.plain_result(self._verify_menu())
             return
 
         if text.lower() == "off":
-            # 关闭定时
             user_data = await self._load_data(user_id)
             user_data["cron"] = ""
             await self._save_data(user_id, user_data)
@@ -802,18 +792,15 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._verify_menu())
             return
 
-        # 验证cron格式（简单检查字段数）
         parts = text.split()
         if len(parts) not in (5, 6):
             yield event.plain_result("❌ cron表达式格式错误，应为5或6个字段，请重新输入")
             return
 
-        # 保存cron
         user_data = await self._load_data(user_id)
         user_data["cron"] = text
         await self._save_data(user_id, user_data)
 
-        # 注册定时任务
         if self._register_user_cron(user_id, text):
             yield event.plain_result(f"✅ 定时规则已更新：{text}")
         else:
@@ -974,7 +961,6 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        # 加载所有用户数据，注册每个用户的定时任务
         all_data = await self.get_kv_data("kuwo_data", {})
         for user_id, user_data in all_data.items():
             cron = user_data.get("cron")
