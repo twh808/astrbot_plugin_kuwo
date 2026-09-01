@@ -236,7 +236,7 @@ def check_withdraw_today(loginUid, loginSid):
     except Exception:
         return False
 
-def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id):
+def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'):
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode'
     params = {
         'loginUid': loginUid,
@@ -871,7 +871,7 @@ class KuwoPlugin(Star):
     async def initialize(self):
         self._register_verification_cron()
         await self._load_data("dummy")
-        logger.info("✅ 酷我插件初始化完成（配置已从 _conf_schema.json 加载）")
+        logger.info("✅ 酷我插件初始化完成（配置从 _conf_schema.json 加载）")
 
     async def terminate(self):
         scheduler = getattr(self.context, 'scheduler', None)
