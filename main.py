@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-酷我音乐管理插件 - AstrBot 交互式菜单
-版本: 2.0.3
+酷我音乐管理插件 - 纯插件实现，不依赖任何外部面板
+版本: 2.0.4
+功能：
+- 账号绑定/解绑/查看（支持多账号，每个账号可指定授权次数）
+- 获取验证码（立即发送，23-24点不限，其他时间过滤今日已提现账户）
+- 提交验证码（缓存5分钟）
+- 立即提现（按顺序使用账号，受授权次数限制，返回详细结果）
+- 定时任务（自动获取验证码和提现）
+- 120秒交互超时自动退出
+- 数据持久化（KV存储）
 """
 import asyncio
 import time
@@ -200,7 +208,7 @@ class KuwoAPI:
             if uid and sid and appuid:
                 return uid.group(1), sid.group(1), appuid.group(1), encrypted_dev_id
             return None
-        except Exception as e:
+        except Exception:
             return None
 
     @staticmethod
@@ -284,7 +292,7 @@ class KuwoAPI:
             return False
 
 # ========================== AstrBot 插件 ==========================
-@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理插件", "2.0.3",
+@register("astrbot_plugin_kuwo", "YourName", "酷我音乐管理插件", "2.0.4",
           "https://github.com/YourName/astrbot_plugin_kuwo")
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -297,10 +305,10 @@ class KuwoPlugin(Star):
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
 
-        self.user_menu_state = {}
-        self.user_last_active = {}
-        self.user_waiting_input = {}
-        self.data = {}
+        self.user_menu_state = {}      # 存储用户所在菜单: 'main', 'get_code', 'withdraw'
+        self.user_last_active = {}     # 最后活动时间戳
+        self.user_waiting_input = {}   # 等待输入类型: 'binding', 'submitting_code', 'withdraw_phone'
+        self.data = {}                 # 持久化数据，键为 user_id，值为 {accounts: [...], auth_limit: int, ...}
         self.cron_job_ids = []
 
     async def _load_data(self):
@@ -327,6 +335,7 @@ class KuwoPlugin(Star):
             }
         return self.data[user_id]
 
+    # ==================== 菜单文本 ====================
     def _main_menu(self) -> str:
         return """🎵 酷我音乐管理菜单
 请回复对应数字：
@@ -376,6 +385,7 @@ class KuwoPlugin(Star):
         if user_id not in self.user_menu_state:
             return
 
+        # 超时检查
         last = self.user_last_active.get(user_id, 0)
         if time.time() - last > 120:
             self.user_menu_state.pop(user_id, None)
@@ -388,6 +398,7 @@ class KuwoPlugin(Star):
         text = event.message_str.strip()
         state = self.user_menu_state.get(user_id)
 
+        # 处理等待输入
         if self.user_waiting_input.get(user_id):
             result = await self._handle_waiting_input(user_id, text)
             if result:
@@ -406,7 +417,7 @@ class KuwoPlugin(Star):
         if result:
             yield event.plain_result(result)
 
-    # ---------- 菜单处理函数 ----------
+    # ==================== 菜单处理（返回消息字符串或None） ====================
     async def _handle_main_menu(self, user_id: str, text: str) -> Optional[str]:
         if text == "0":
             self.user_menu_state.pop(user_id, None)
@@ -556,7 +567,7 @@ class KuwoPlugin(Star):
             return "❌ 您还没有绑定账号，请先绑定"
         return None
 
-    # ---------- 核心业务 ----------
+    # ==================== 核心业务 ====================
     async def _send_codes_batch(self, user_id: str, accounts: List[dict]) -> List[Tuple[str, bool, str]]:
         results = []
         login_infos = []
@@ -600,6 +611,10 @@ class KuwoPlugin(Star):
             )
             results.append((phone, success, detail))
             if success:
+                # 扣减授权次数
+                if user_data["auth_limit"] > 0:
+                    user_data["auth_limit"] -= 1
+                # 记录今日提现成功
                 today = datetime.now().strftime("%Y-%m-%d")
                 if today not in user_data["daily_withdraw"]:
                     user_data["daily_withdraw"][today] = {}
@@ -607,7 +622,7 @@ class KuwoPlugin(Star):
                 await self._save_data()
         return results
 
-    # ---------- 定时任务 ----------
+    # ==================== 定时任务 ====================
     async def _setup_cron(self):
         await asyncio.sleep(3)
         scheduler = getattr(self.context, 'scheduler', None)
