@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（修复提交验证码自动缓存问题）
+# 3. AstrBot 插件主类
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -806,7 +806,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(main_menu)
 
-    # ---------- 修复：提交验证码 - 选择账号（设置标记防止同消息触发验证码输入） ----------
+    # ---------- 修复：提交验证码 - 选择账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -837,15 +837,13 @@ class KuwoPlugin(Star):
             return
         phone = accounts[idx-1]["phone"]
         self._update_state(user_id, step='waiting_code_input', tmp_data={'phone': phone})
-        # 设置标记，防止同一条消息继续触发 handle_code_input
         setattr(event, '_code_phone_processed', True)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
-    # ---------- 修复：提交验证码 - 输入验证码（检查标记避免自动缓存） ----------
+    # ---------- 修复：提交验证码 - 输入验证码 ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
-        # 如果消息已被选择账号处理器处理，则跳过
         if getattr(event, '_code_phone_processed', False):
             return
         user_id = event.get_sender_id()
@@ -1063,6 +1061,7 @@ class KuwoPlugin(Star):
         logger.info(f"返回提示: {prompt[:50]}...")
         return prompt
 
+    # ========== 修改：提现后删除验证码 ==========
     async def _do_withdraw(self, user_id: str, event: AstrMessageEvent) -> str:
         user_data = await self._load_data(user_id)
         if not user_data["accounts"]:
@@ -1080,20 +1079,24 @@ class KuwoPlugin(Star):
         results = []
         success_count = 0
         codes = user_data.get("verification_codes", {})
+
         for acc in accounts:
             phone = acc["phone"]
             code_info = codes.get(phone)
             if not code_info or time.time() > code_info.get("expire", 0):
                 results.append(f"❌ {phone}: 验证码未获取或已过期")
                 continue
+
             login = login_kuwo(phone, acc["password"])
             if not login:
                 results.append(f"❌ {phone}: 登录失败")
                 continue
             uid, sid, appuid, _ = login
+
             if check_withdraw_today(uid, sid):
                 results.append(f"⏭️ {phone}: 今日已提现，跳过")
                 continue
+
             encrypted_phone = encrypt_phone(phone)
             code = code_info["code"]
             log_lines, final_msg, is_success = withdraw_confirm_once(
@@ -1101,6 +1104,11 @@ class KuwoPlugin(Star):
                 self.kwtxid, self.verification_id, self.q36,
                 seq=1, max_extra_retries=self.max_retries, retry_delay_ms=self.retry_delay_ms
             )
+
+            # 无论成功失败，只要发送了提现请求，就删除该账号的验证码缓存
+            if phone in user_data["verification_codes"]:
+                del user_data["verification_codes"][phone]
+
             if is_success:
                 success_count += 1
                 if auth_limit != -1:
@@ -1109,10 +1117,13 @@ class KuwoPlugin(Star):
                 if today not in user_data["daily_withdraw"]:
                     user_data["daily_withdraw"][today] = {}
                 user_data["daily_withdraw"][today][phone] = True
-                await self._save_data(user_id, user_data)
                 results.append(f"✅ 提现成功 {phone}: {final_msg}")
             else:
                 results.append(f"❌ 提现失败 {phone}: {final_msg}")
+
+        # 保存数据（包含可能修改的 auth_limit 和删除的验证码）
+        await self._save_data(user_id, user_data)
+
         summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {'无限制' if user_data['auth_limit'] == -1 else user_data['auth_limit']}\n━━━━━━━━━━━━\n"
         main_menu = await self._get_main_menu_text(user_id)
         return summary + "\n".join(results) + "\n" + main_menu
@@ -1730,7 +1741,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.5.8 修复提交验证码自动缓存问题")
+        logger.info("✅ 酷我插件 2.5.9 提现自动删除验证码版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
