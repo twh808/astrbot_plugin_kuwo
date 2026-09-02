@@ -1,14 +1,106 @@
-# astrbot-plugin-helloworld
+🎵 酷我音乐提现管理插件 使用说明
+📌 插件简介
+本插件是一个基于 AstrBot 框架的酷我音乐账号管理与自动提现工具。支持多账号绑定、验证码获取、自动提现（立即/定时）、管理员面板管理等功能，并附带完整的日志记录与通知机制。
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+✨ 主要功能
+👤 普通用户功能
+功能	说明
+账号管理	绑定/解绑/查看已绑定的酷我账号（手机号+密码）
+获取验证码	立即获取或定时获取提现所需的短信验证码
+提交验证码	手动输入验证码并缓存（5分钟有效）
+立即提现	立即对所有已绑定且拥有有效验证码的账号发起提现请求
+开启/停用整点提现	一键切换定时提现开关（默认开启），每天 9:00、13:00、17:00、20:00 自动提现
+查看剩余授权次数	主菜单顶部显示剩余可用提现次数（-1 表示无限制）
+🔧 管理员功能（需在 WebUI 配置 admin_qq）
+功能	说明
+查看所有账号	列出所有用户及其绑定的手机号
+删除账号	删除指定用户的指定酷我账号
+修改授权次数	修改指定用户的授权次数（输入 -1 表示无限制）
+发送验证码	为指定用户的指定账号发送验证码
+为指定用户绑定账号	管理员可直接为任意 QQ 用户绑定酷我账号
+重置用户所有数据	清除指定用户的全部数据（账号、授权次数、验证码缓存等）
+查看最近提现记录	查看所有用户的最近一次提现时间与结果摘要
+📂 命令列表
+命令	权限	说明
+酷我	普通用户	进入普通用户菜单
+酷我管理	管理员	进入管理面板
+管理面板	管理员	进入管理面板（别名）
+⚙️ 配置项（WebUI）
+在 AstrBot WebUI 的插件配置中可修改以下参数：
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+配置项	类型	默认值	说明
+default_auth_limit	int	3	新用户默认授权次数（提现成功扣减一次）
+default_verification_cron	string	12 55 8,12,16,19 * * *	默认定时获取验证码的 cron 表达式
+default_withdraw_cron	string	0 0 9,13,17,20 * * *	默认整点提现的 cron 表达式
+verification_id	string	（内置）	验证会话 ID
+q36	string	（内置）	设备指纹
+kwtxid	string	30002	配额 ID
+timeout	int	120	交互超时时间（秒）
+max_retries	int	3	提现遇到“频繁”错误时的最大重试次数（第一次不计入）
+retry_delay_ms	int	4000	重试延迟（毫秒）
+quota_id	string	60004	验证码配额 ID
+admin_qq	list	[]	管理员 QQ 号列表，如 ["123456"]
+🚀 使用指南
+1️⃣ 绑定账号
+text
+酷我 → 1️⃣ 账号管理 → 1️⃣ 绑定账号
+输入格式：手机号#密码（多个账号用 & 分隔）
+示例：13800138000#mypassword 或 13800138000#pass1&13900139000#pass2
 
-# Supports
+2️⃣ 获取验证码
+立即获取：
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+text
+酷我 → 2️⃣ 获取验证码 → 1️⃣ 立即获取
+选择要发送的账号（输入序号，多个用逗号分隔，或输入 all 全部），系统会自动向酷我服务器请求验证码并缓存。
+
+定时获取：
+
+text
+酷我 → 2️⃣ 获取验证码 → 2️⃣ 定时获取
+进入定时管理子菜单，可查看/设置/删除定时规则，或立即执行一次。
+
+3️⃣ 提交验证码
+text
+酷我 → 3️⃣ 提交验证码
+选择账号，输入收到的短信验证码，缓存有效期 5 分钟。
+
+4️⃣ 立即提现
+text
+酷我 → 4️⃣ 提现 → 1️⃣ 立即提现
+系统会并发对所有已绑定且拥有有效验证码的账号发起提现请求，结果会显示并保存日志。
+
+5️⃣ 开启/停用整点提现
+text
+酷我 → 4️⃣ 提现 → 2️⃣ 开启/停用整点提现
+一键切换，默认开启。启用后每天 9:00、13:00、17:00、20:00 自动提现，结果会通过私聊通知。
+
+🛠️ 管理员面板使用
+text
+酷我管理
+进入后选择对应数字进行操作。各功能均有交互式引导，按提示输入即可。
+
+📝 日志与通知
+提现日志：每次提现（立即或定时）的结果会保存在用户数据中，可通过管理面板 7️⃣ 查看最近提现记录 查看所有用户的最近一次提现情况。
+
+定时通知：整点提现完成后，会通过私聊向该用户发送结果通知（若存在会话）。
+
+⚠️ 注意事项
+授权次数：当授权次数为 0 时，无法获取验证码和发起提现。管理员可修改为任意正数或 -1（无限制）。
+
+验证码有效期：提交的验证码缓存有效期为 5 分钟，超时需重新获取。
+
+并发提现：提现时多个账号并发执行，效率较高，但请确保网络稳定。
+
+频繁错误重试：提现遇到“频繁”错误时会自动重试（默认最多 3 次，间隔 4 秒）。
+
+未配置验证码的账号：在整点提现或立即提现时，未获取验证码或验证码已过期的账号会自动跳过，不影响其他账号。
+
+📄 版本信息
+当前版本：2.10.0
+
+更新内容：新增提现日志存储与管理员查看功能，优化提现结果主动通知机制。
+
+作者：yixiuge
+
+如有任何问题或建议，欢迎反馈。🎵
