@@ -1,6 +1,6 @@
 name: astrbot_plugin_kuwo
 display_name: 酷我音乐管理
-version: "2.2.0"
+version: "2.10.0"
 desc: 酷我音乐账号绑定、验证码、提现（纯数字交互，稳定版）
 short_desc: 酷我音乐管理（纯数字版）
 author: YourName
