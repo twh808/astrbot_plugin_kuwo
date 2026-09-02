@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（完整版）
+# 3. AstrBot 插件主类（修复提交验证码自动缓存问题）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -806,6 +806,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(main_menu)
 
+    # ---------- 修复：提交验证码 - 选择账号（设置标记防止同消息触发验证码输入） ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -836,11 +837,17 @@ class KuwoPlugin(Star):
             return
         phone = accounts[idx-1]["phone"]
         self._update_state(user_id, step='waiting_code_input', tmp_data={'phone': phone})
+        # 设置标记，防止同一条消息继续触发 handle_code_input
+        setattr(event, '_code_phone_processed', True)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
+    # ---------- 修复：提交验证码 - 输入验证码（检查标记避免自动缓存） ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
+        # 如果消息已被选择账号处理器处理，则跳过
+        if getattr(event, '_code_phone_processed', False):
+            return
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_code_input':
@@ -1419,7 +1426,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    # ========== 管理员发送验证码 - 选择用户 ==========
+    # 管理员发送验证码 - 选择用户
     @filter.regex(r'^\d+$')
     async def handle_admin_send_code_select_user(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1467,7 +1474,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(prompt)
 
-    # ========== 管理员发送验证码 - 选择账号 ==========
+    # 管理员发送验证码 - 选择账号
     @filter.regex(r'^(all|[\d,]+|0|q|Q)$')
     async def handle_admin_send_code_select_account(self, event: AstrMessageEvent):
         if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
@@ -1495,7 +1502,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
 
-        # 解析要发送的账号手机号列表
         phones_to_send = []
         if text == "all":
             phones_to_send = [acc["phone"] for acc in accounts]
@@ -1515,7 +1521,7 @@ class KuwoPlugin(Star):
                 yield event.plain_result("❌ 输入格式错误，请输入数字序号（用逗号分隔）或 all")
                 return
 
-        # 检查该用户的授权次数
+        # 检查授权次数
         user_data = await self._load_data(target_uid)
         auth_limit = user_data.get('auth_limit', 0)
         if auth_limit == 0:
@@ -1601,7 +1607,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"⚠️ 即将重置用户 {target_uid} 的所有数据（包括账号、授权次数、验证码缓存等），确定继续？(y/n)")
 
-    # 确认操作（仅重置确认，发送验证码已独立处理）
+    # 确认操作（仅重置确认）
     @filter.regex(r'^[yYnN]$')
     async def handle_admin_confirm(self, event: AstrMessageEvent):
         if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
@@ -1633,7 +1639,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    # ========== 管理员为指定用户绑定账号（选项5） ==========
+    # 管理员为指定用户绑定账号（选项5）
     @filter.regex(r'^\d+$')
     async def handle_admin_bind_user(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1724,7 +1730,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.5.7 管理员发送验证码可选账号版已加载")
+        logger.info("✅ 酷我插件 2.5.8 修复提交验证码自动缓存问题")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
