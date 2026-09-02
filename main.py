@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.2.2 版，修复生成器调用）
+# 3. AstrBot 插件主类（2.2.3 版，含完整加密常量）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -567,8 +567,6 @@ class KuwoPlugin(Star):
             yield event.plain_result("帮助：发送“酷我”进入菜单，回复数字操作。\n120秒无操作自动退出。")
             yield event.plain_result(self._main_menu())
 
-        # 其他情况不会进入
-
     # ---------- 提现逻辑 ----------
     async def _do_withdraw(self, user_id: str, event: AstrMessageEvent):
         user_data = await self._load_data(user_id)
@@ -629,6 +627,10 @@ class KuwoPlugin(Star):
     # ---------- 验证码子菜单 ----------
     @filter.regex(r'^[0-3]$')
     async def handle_verify_choice(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
+        setattr(event, '_menu_choice_processed', True)
+
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('menu') != 'verify' or state.get('step'):
@@ -644,7 +646,6 @@ class KuwoPlugin(Star):
             return
 
         elif text == "1":
-            # 立即获取（_do_send_code 是生成器，需要迭代）
             async for ret in self._do_send_code(user_id, event):
                 yield ret
             return
@@ -696,12 +697,11 @@ class KuwoPlugin(Star):
         user_data["cron"] = text
         await self._save_data(user_id, user_data)
 
-        # 提示定时功能不可用
         yield event.plain_result(f"✅ 定时规则已更新：{text}\n⚠️ 注意：当前环境不支持调度器，定时自动获取功能不可用，请使用立即获取。")
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 发送验证码（生成器，用于列出账号并处理选择） ----------
+    # ---------- 发送验证码（生成器） ----------
     async def _do_send_code(self, user_id: str, event: AstrMessageEvent):
         user_data = await self._load_data(user_id)
         if not user_data["accounts"]:
@@ -710,7 +710,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._main_menu())
             return
 
-        # 列出账号供选择
         lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
         prompt = "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
         self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': user_data["accounts"]})
@@ -719,6 +718,9 @@ class KuwoPlugin(Star):
     # ---------- 处理发送验证码的选择 ----------
     @filter.regex(r'^(all|[\d,]+)$')
     async def handle_send_select(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
+
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_send_select':
@@ -760,7 +762,6 @@ class KuwoPlugin(Star):
 
         results = []
         for phone in phones_to_send:
-            # 查找密码
             password = None
             for acc in accounts:
                 if acc["phone"] == phone:
@@ -789,13 +790,15 @@ class KuwoPlugin(Star):
     # ---------- 提交验证码 - 选择账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
+
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_code_phone':
             return
 
         text = event.message_str.strip()
-        # 忽略触发消息
         if text == state.get('tmp_data', {}).get('trigger_msg'):
             return
 
@@ -917,13 +920,15 @@ class KuwoPlugin(Star):
     # ---------- 删除账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
+
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_delete':
             return
 
         text = event.message_str.strip()
-        # 忽略触发消息
         if text == state.get('tmp_data', {}).get('trigger_msg'):
             return
 
@@ -971,7 +976,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.2.2 版已加载")
+        logger.info("✅ 酷我插件 2.2.3 版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
