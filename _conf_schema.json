@@ -52,5 +52,14 @@
         "type": "string",
         "default": "60004",
         "hint": "发送验证码时使用的配额ID"
+    },
+    "admin_qq": {
+        "description": "管理员QQ号列表（允许使用管理面板的账号）",
+        "type": "array",
+        "items": {
+            "type": "string"
+        },
+        "default": [],
+        "hint": "填写多个QQ号，如 [\"123456\", \"789012\"]"
     }
 }
