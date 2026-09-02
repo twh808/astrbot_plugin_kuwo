@@ -55,7 +55,7 @@
     },
     "admin_qq": {
         "description": "管理员QQ号列表（允许使用管理面板的账号）",
-        "type": "array",
+        "type": "list",
         "items": {
             "type": "string"
         },
