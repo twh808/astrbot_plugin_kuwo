@@ -33,7 +33,7 @@ static_k = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 static_j = [13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1, 22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1, 40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1, 43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1]
 
 # ======================================================================
-# 2. 加密与 API 函数（完整，与之前相同）
+# 2. 加密与 API 函数（完整）
 # ======================================================================
 def func_a1(iArr, i2, j2):
     j3 = 0
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（定时获取验证码 + 修复 cron 输入正则）
+# 3. AstrBot 插件主类
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -686,7 +686,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(main_menu)
             return
-        elif text == "1":  # 立即获取
+        elif text == "1":
             setattr(event, '_verify_choice_processed', True)
             logger.info(f"用户 {user_id} 选择立即获取验证码")
             result_msg = await self._do_send_code(user_id)
@@ -697,7 +697,7 @@ class KuwoPlugin(Star):
                 self._schedule_timeout(user_id)
                 yield event.plain_result("⚠️ 内部错误，未能获取验证码菜单，请重试或重新绑定账号。")
             return
-        elif text == "2":  # 定时获取
+        elif text == "2":
             self._update_state(user_id, menu='verify_timer', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._verify_timer_menu())
@@ -719,7 +719,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._verify_menu())
             return
-        elif text == "1":  # 查看
+        elif text == "1":
             user_data = await self._load_data(user_id)
             job = user_data.get('scheduled_job', {})
             if not job.get('cron') or not job.get('enabled'):
@@ -738,15 +738,18 @@ class KuwoPlugin(Star):
             )
             self._schedule_timeout(user_id)
             yield event.plain_result(self._verify_timer_menu())
-        elif text == "2":  # 设置
+        elif text == "2":
+            # 设置定时规则 - 标记此消息已处理
+            setattr(event, '_timer_choice_processed', True)
             self._update_state(user_id, step='set_timer_cron')
             self._schedule_timeout(user_id)
             yield event.plain_result(
                 "📝 请输入cron表达式（格式：秒 分 时 日 月 周）\n"
-                "例如：12 55 8,12,16,19 * * *（每天8:55:12、12:55:12、16:55:12、19:55:12执行）\n"
+                "支持：*（任意）、数字、逗号分隔、范围(1-5)、步长(*/5)\n"
+                "例如：12 55 8,12,16,19 * * *\n"
                 "输入 0 取消"
             )
-        elif text == "3":  # 删除
+        elif text == "3":
             user_data = await self._load_data(user_id)
             job = user_data.get('scheduled_job', {})
             if not job.get('cron'):
@@ -761,14 +764,17 @@ class KuwoPlugin(Star):
             yield event.plain_result("✅ 定时规则已删除。")
             self._schedule_timeout(user_id)
             yield event.plain_result(self._verify_timer_menu())
-        elif text == "4":  # 立即执行
+        elif text == "4":
             self._schedule_timeout(user_id)
             yield event.plain_result("⏳ 正在执行定时任务，请稍候...")
             asyncio.create_task(self._execute_scheduled_job(user_id, is_manual=True))
 
-    # ========== 定时任务设置：输入 cron 表达式（修复正则） ==========
+    # ========== 定时任务设置：输入 cron 表达式（修复重复处理） ==========
     @filter.regex(r'^.+$')
     async def handle_set_timer_cron(self, event: AstrMessageEvent):
+        # 如果消息已被定时菜单处理器处理，则跳过
+        if getattr(event, '_timer_choice_processed', False):
+            return
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'set_timer_cron':
@@ -788,8 +794,8 @@ class KuwoPlugin(Star):
             yield event.plain_result("❌ cron表达式格式错误，应为5或6个字段，请重新输入")
             return
 
-        # 简单验证：每个字段由数字、*、-、, 组成（或为 *）
-        valid_pattern = re.compile(r'^(\*|\d+|[,\d-]+)$')
+        # 验证每个字段是否合法（允许 *, 数字, 逗号, 范围, 步长）
+        valid_pattern = re.compile(r'^(\*|\d+|[,\d-]+|(\*|\d+)/\d+|\d+-\d+)$')
         for part in parts:
             if not valid_pattern.match(part):
                 self._schedule_timeout(user_id)
@@ -1242,34 +1248,65 @@ class KuwoPlugin(Star):
 
     # ========== 定时任务核心功能 ==========
     def _parse_cron(self, cron_expr: str) -> dict:
+        """解析cron表达式，返回各字段列表，支持 *, 数字, 逗号, 范围(1-5), 步长(*/5)"""
         parts = cron_expr.split()
         if len(parts) == 5:
-            parts = ['*'] + parts
+            parts = ['*'] + parts  # 补秒
         fields = ['second', 'minute', 'hour', 'day', 'month', 'weekday']
         result = {}
         for i, part in enumerate(parts):
             if part == '*':
-                result[fields[i]] = None
-            elif ',' in part:
-                result[fields[i]] = [int(x) for x in part.split(',')]
+                result[fields[i]] = None  # 表示匹配任意值
             else:
-                result[fields[i]] = [int(part)]
+                # 解析可能包含范围或步长的部分
+                values = set()
+                if '/' in part:
+                    # 步长格式，如 */5 或 0-30/2
+                    base, step = part.split('/')
+                    step = int(step)
+                    if base == '*':
+                        # 根据字段确定范围
+                        max_val = {'second': 59, 'minute': 59, 'hour': 23, 'day': 31, 'month': 12, 'weekday': 7}[fields[i]]
+                        values = set(range(0, max_val+1, step))
+                    else:
+                        # 解析范围
+                        if '-' in base:
+                            start, end = base.split('-')
+                            start, end = int(start), int(end)
+                            values = set(range(start, end+1, step))
+                        else:
+                            # 单个数字 + 步长（实际上无效，但兼容）
+                            values = {int(base)}
+                elif '-' in part:
+                    # 范围，如 1-5
+                    start, end = part.split('-')
+                    start, end = int(start), int(end)
+                    values = set(range(start, end+1))
+                elif ',' in part:
+                    values = set(int(x) for x in part.split(','))
+                else:
+                    values = {int(part)}
+                result[fields[i]] = sorted(values) if values else None
         return result
 
     def _match_cron(self, cron_dict: dict, dt: datetime) -> bool:
-        if cron_dict.get('second') is not None and dt.second not in cron_dict['second']:
-            return False
-        if cron_dict.get('minute') is not None and dt.minute not in cron_dict['minute']:
-            return False
-        if cron_dict.get('hour') is not None and dt.hour not in cron_dict['hour']:
-            return False
-        if cron_dict.get('day') is not None and dt.day not in cron_dict['day']:
-            return False
-        if cron_dict.get('month') is not None and dt.month not in cron_dict['month']:
-            return False
-        if cron_dict.get('weekday') is not None:
-            wd = dt.weekday() + 1
-            if wd not in cron_dict['weekday']:
+        """检查当前时间是否匹配cron字典"""
+        for field, values in cron_dict.items():
+            if values is None:
+                continue
+            if field == 'second':
+                current = dt.second
+            elif field == 'minute':
+                current = dt.minute
+            elif field == 'hour':
+                current = dt.hour
+            elif field == 'day':
+                current = dt.day
+            elif field == 'month':
+                current = dt.month
+            elif field == 'weekday':
+                current = dt.weekday() + 1  # 1=周一, 7=周日
+            if current not in values:
                 return False
         return True
 
@@ -1954,7 +1991,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.6.1 修复 cron 输入正则版已加载")
+        logger.info("✅ 酷我插件 2.6.1 完整修复版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动")
