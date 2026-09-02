@@ -33,7 +33,7 @@ static_k = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 static_j = [13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1, 22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1, 40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1, 43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1]
 
 # ======================================================================
-# 2. 加密与 API 函数（完整）
+# 2. 加密与 API 函数（完整，与之前完全相同）
 # ======================================================================
 def func_a1(iArr, i2, j2):
     j3 = 0
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（默认开启整点提现 + 动态菜单）
+# 3. AstrBot 插件主类（菜单固定文字）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -546,16 +546,12 @@ class KuwoPlugin(Star):
             "0️⃣ 返回"
         )
 
-    async def _get_withdraw_menu_text(self, user_id: str) -> str:
-        """动态生成提现菜单，显示当前整点提现状态"""
-        user_data = await self._load_data(user_id)
-        job = user_data.get('withdraw_scheduled_job', {})
-        enabled = job.get('enabled', False)
-        status_text = "开启" if enabled else "停用"
+    # ========== 修改点：提现菜单固定文字 ==========
+    def _withdraw_menu(self) -> str:
         return (
             "💳 提现\n"
             "1️⃣ 立即提现\n"
-            f"2️⃣ {status_text}整点提现\n"
+            "2️⃣ 开启/停用整点提现\n"
             "0️⃣ 返回主菜单"
         )
 
@@ -640,9 +636,8 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
         elif text == "4":
             self._update_state(user_id, menu='withdraw', step=None)
-            menu_text = await self._get_withdraw_menu_text(user_id)
             self._schedule_timeout(user_id)
-            yield event.plain_result(menu_text)
+            yield event.plain_result(self._withdraw_menu())
 
     # ---------- 普通用户子菜单 ----------
     @filter.regex(r'^[0-3]$')
@@ -883,11 +878,10 @@ class KuwoPlugin(Star):
                     f"📅 定时规则：{cron}\n"
                     f"🕐 将在匹配时间自动发送提现请求"
                 )
-            # 显示更新后的提现菜单
-            menu_text = await self._get_withdraw_menu_text(user_id)
+            # 显示更新后的提现菜单（固定文字）
             self._update_state(user_id, menu='withdraw', step=None)
             self._schedule_timeout(user_id)
-            yield event.plain_result(menu_text)
+            yield event.plain_result(self._withdraw_menu())
 
     # ---------- 普通用户辅助 ----------
     @filter.regex(r'^(all|[\d,]+|0|q|Q)$')
@@ -1277,8 +1271,6 @@ class KuwoPlugin(Star):
                 result_lines.append(f"❌ 提现失败 {phone}: {desc}")
 
         # 如果有跳过的情况（无验证码、今日已提现等），需单独记录
-        # 但上面的 gather 只处理了 valid_accounts，无验证码的账号未被包含
-        # 需要单独处理无验证码的账号
         skipped_phones = [acc["phone"] for acc in accounts if acc["phone"] not in [r[0] for r in results]]
         for phone in skipped_phones:
             result_lines.append(f"⏭️ {phone}: 无有效验证码，已跳过")
@@ -2149,7 +2141,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.9.0 默认开启整点提现版已加载")
+        logger.info("✅ 酷我插件 2.9.1 菜单固定文字版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
