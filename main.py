@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（统一所有序号为带圈数字）
+# 3. AstrBot 插件主类（优化查看提现记录排版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -1527,7 +1527,7 @@ class KuwoPlugin(Star):
                 return False
         return True
 
-    # ---------- 管理员查看最近提现记录 ----------
+    # ---------- 管理员查看最近提现记录（优化排版） ----------
     async def _view_last_withdraw_logs(self) -> str:
         all_data = await self._load_all_data()
         if not all_data:
@@ -1535,15 +1535,38 @@ class KuwoPlugin(Star):
         lines = []
         for uid, udata in all_data.items():
             log = udata.get('last_withdraw_log')
+            # 用户标识
+            user_line = f"👤 QQ {uid}"
             if log:
                 time_str = log.get('time', '未知时间')
                 result = log.get('result', '')
-                lines.append(f"👤 {uid}\n   🕐 {time_str}\n   📝 {result[:200]}{'...' if len(result)>200 else ''}")
+                # 提取摘要：显示成功/失败数量
+                success_match = re.search(r'✅ 成功: (\d+)', result)
+                fail_match = re.search(r'❌ 失败: (\d+)', result)
+                skip_match = re.search(r'⏭️ 跳过: (\d+)', result)
+                success = success_match.group(1) if success_match else '0'
+                fail = fail_match.group(1) if fail_match else '0'
+                skip = skip_match.group(1) if skip_match else '0'
+                summary = f"成功 {success} / 失败 {fail} / 跳过 {skip}"
+                lines.append(
+                    f"┌─────────────────────────\n"
+                    f"│ {user_line}\n"
+                    f"│ 🕐 时间：{time_str}\n"
+                    f"│ 📊 概况：{summary}\n"
+                    f"│ 📝 详情：\n"
+                    f"│   {result.replace(chr(10), chr(10) + '│   ')}\n"
+                    f"└─────────────────────────"
+                )
             else:
-                lines.append(f"👤 {uid} -> 暂无提现记录")
-        return "📋 最近提现记录：\n" + "\n\n".join(lines)
+                lines.append(
+                    f"┌─────────────────────────\n"
+                    f"│ {user_line}\n"
+                    f"│ 📭 暂无提现记录\n"
+                    f"└─────────────────────────"
+                )
+        return "📋 最近提现记录：\n\n" + "\n\n".join(lines)
 
-    # ---------- 管理员菜单主处理器（统一序号样式） ----------
+    # ---------- 管理员菜单主处理器 ----------
     @filter.regex(r'^[0-7]$')
     async def handle_admin_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -1588,7 +1611,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
-        elif text == "2":  # 删除账号（带圈序号）
+        elif text == "2":  # 删除账号
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1612,7 +1635,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "3":  # 修改授权（带圈序号）
+        elif text == "3":  # 修改授权
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1636,7 +1659,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "4":  # 发送验证码（带圈序号，支持 all）
+        elif text == "4":  # 发送验证码
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1664,7 +1687,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_bind_user')
             self._schedule_timeout(user_id)
             yield event.plain_result("请输入要绑定账号的目标用户QQ号：")
-        elif text == "6":  # 重置数据（带圈序号）
+        elif text == "6":  # 重置数据
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1872,7 +1895,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    # ========== 发送验证码 - 选择用户（支持 all，带圈序号） ==========
+    # ========== 发送验证码 - 选择用户 ==========
     @filter.regex(r'^(all|\d+)$')
     async def handle_admin_send_code_select_user(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1889,7 +1912,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
 
-        # all 逻辑
         if text == "all":
             all_data = await self._load_all_data()
             if not all_data:
@@ -1954,7 +1976,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
 
-        # 单个用户
         try:
             idx = int(text) - 1
         except:
@@ -2235,7 +2256,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.10.5 统一序号样式版已加载")
+        logger.info("✅ 酷我插件 2.10.6 优化提现记录排版版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
