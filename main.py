@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.2.3 版，含完整加密常量）
+# 3. AstrBot 插件主类（2.2.4 版，含完整加密常量）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -646,8 +646,11 @@ class KuwoPlugin(Star):
             return
 
         elif text == "1":
-            async for ret in self._do_send_code(user_id, event):
-                yield ret
+            # 立即获取
+            result_msg = await self._do_send_code(user_id)
+            if result_msg:
+                yield event.plain_result(result_msg)
+            # 返回主菜单
             return
 
         elif text == "2":
@@ -701,19 +704,17 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 发送验证码（生成器） ----------
-    async def _do_send_code(self, user_id: str, event: AstrMessageEvent):
+    # ---------- 发送验证码 ----------
+    async def _do_send_code(self, user_id: str) -> str:
         user_data = await self._load_data(user_id)
         if not user_data["accounts"]:
-            yield event.plain_result("❌ 您还没有绑定任何账号")
             self._update_state(user_id, menu='main')
-            yield event.plain_result(self._main_menu())
-            return
+            return "❌ 您还没有绑定任何账号"
 
         lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
         prompt = "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
         self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': user_data["accounts"]})
-        yield event.plain_result(prompt)
+        return prompt
 
     # ---------- 处理发送验证码的选择 ----------
     @filter.regex(r'^(all|[\d,]+)$')
@@ -976,7 +977,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.2.3 版已加载")
+        logger.info("✅ 酷我插件 2.2.4 版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
