@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（完整功能 + 管理员面板，修复消息重复处理）
+# 3. AstrBot 插件主类
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -475,7 +475,7 @@ class KuwoPlugin(Star):
         except asyncio.CancelledError:
             pass
 
-    # ---------- 菜单生成 ----------
+    # ---------- 菜单 ----------
     async def _get_main_menu_text(self, user_id: str) -> str:
         user_data = await self._load_data(user_id)
         auth_limit = user_data.get('auth_limit', 0)
@@ -536,8 +536,8 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(menu_text)
 
-    @filter.command("管理面板")
-    async def admin_panel(self, event: AstrMessageEvent):
+    @filter.command("酷我管理")
+    async def admin_panel_main(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         if user_id not in self.admin_qq:
             yield event.plain_result("⛔ 您没有权限使用此命令。")
@@ -547,6 +547,10 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
+
+    @filter.command("管理面板")
+    async def admin_panel_alias(self, event: AstrMessageEvent):
+        await self.admin_panel_main(event)
 
     # ---------- 普通用户主菜单处理器 ----------
     @filter.regex(r'^[0-4]$')
@@ -593,7 +597,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._withdraw_menu())
 
-    # ---------- 普通用户子菜单处理器 ----------
+    # ---------- 普通用户子菜单 ----------
     @filter.regex(r'^[0-3]$')
     async def handle_account_choice(self, event: AstrMessageEvent):
         if getattr(event, '_main_choice_processed', False):
@@ -1006,7 +1010,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出")
 
-    # ---------- 核心功能函数 ----------
+    # ---------- 核心功能 ----------
     async def _do_send_code(self, user_id: str) -> str:
         logger.info(f"🟢 _do_send_code 被调用，用户 {user_id}")
         user_data = await self._load_data(user_id)
@@ -1089,9 +1093,7 @@ class KuwoPlugin(Star):
             yield event.plain_result("⛔ 权限已变更，请重新操作。")
             return
 
-        # 设置标记，防止同一消息继续触发其他数字处理器
         setattr(event, '_admin_choice_processed', True)
-
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
 
@@ -1125,68 +1127,122 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
         elif text == "2":
-            self._update_state(user_id, step='admin_del_user')
+            all_data = await self._load_all_data()
+            if not all_data:
+                self._schedule_timeout(user_id)
+                yield event.plain_result("📭 暂无用户数据。")
+                self._update_state(user_id, menu='admin', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(self._admin_menu())
+                return
+            user_list = []
+            for idx, (uid, udata) in enumerate(all_data.items(), 1):
+                accounts = udata.get('accounts', [])
+                if accounts:
+                    phones = ', '.join([a['phone'] for a in accounts])
+                    user_list.append(f"{idx}. {uid} -> {phones}")
+                else:
+                    user_list.append(f"{idx}. {uid} -> (无账号)")
+            prompt = "请选择要删除账号的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
+            self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
-            yield event.plain_result("请输入要删除账号的用户QQ号：")
+            yield event.plain_result(prompt)
         elif text == "3":
-            self._update_state(user_id, step='admin_mod_limit_user')
+            all_data = await self._load_all_data()
+            if not all_data:
+                self._schedule_timeout(user_id)
+                yield event.plain_result("📭 暂无用户数据。")
+                self._update_state(user_id, menu='admin', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(self._admin_menu())
+                return
+            user_list = []
+            for idx, (uid, udata) in enumerate(all_data.items(), 1):
+                accounts = udata.get('accounts', [])
+                if accounts:
+                    phones = ', '.join([a['phone'] for a in accounts])
+                    user_list.append(f"{idx}. {uid} -> {phones}")
+                else:
+                    user_list.append(f"{idx}. {uid} -> (无账号)")
+            prompt = "请选择要修改授权次数的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
+            self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
-            yield event.plain_result("请输入要修改授权次数的用户QQ号：")
+            yield event.plain_result(prompt)
         elif text == "4":
             self._update_state(user_id, step='admin_send_code_confirm')
             self._schedule_timeout(user_id)
             yield event.plain_result("⚠️ 即将对**所有用户的所有账号**发送验证码，确定继续？(y/n)")
         elif text == "5":
-            self._update_state(user_id, step='admin_reset_user')
+            all_data = await self._load_all_data()
+            if not all_data:
+                self._schedule_timeout(user_id)
+                yield event.plain_result("📭 暂无用户数据。")
+                self._update_state(user_id, menu='admin', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(self._admin_menu())
+                return
+            user_list = []
+            for idx, (uid, udata) in enumerate(all_data.items(), 1):
+                accounts = udata.get('accounts', [])
+                if accounts:
+                    phones = ', '.join([a['phone'] for a in accounts])
+                    user_list.append(f"{idx}. {uid} -> {phones}")
+                else:
+                    user_list.append(f"{idx}. {uid} -> (无账号)")
+            prompt = "请选择要重置数据的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
+            self._update_state(user_id, step='admin_reset_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
-            yield event.plain_result("请输入要重置数据的用户QQ号：")
+            yield event.plain_result(prompt)
 
-    # ---------- 管理员子步骤处理器（均检查 _admin_choice_processed 标记） ----------
+    # ---------- 管理员子步骤 ----------
+    # 删除账号 - 选择用户
     @filter.regex(r'^\d+$')
-    async def handle_admin_input_user(self, event: AstrMessageEvent):
-        # 如果消息已被管理员主处理器处理过，则跳过
+    async def handle_admin_del_select(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
             return
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
-        step = state.get('step')
-        if step not in ('admin_del_user', 'admin_mod_limit_user', 'admin_reset_user'):
+        if state.get('step') != 'admin_del_select':
             return
 
-        target_uid = event.message_str.strip()
-        all_data = await self._load_all_data()
-        if target_uid not in all_data:
-            self._schedule_timeout(user_id)
-            yield event.plain_result(f"❌ 用户 {target_uid} 不存在。")
+        text = event.message_str.strip()
+        if text == "0":
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
             return
 
-        if step == 'admin_del_user':
-            accounts = all_data[target_uid].get('accounts', [])
-            if not accounts:
-                self._schedule_timeout(user_id)
-                yield event.plain_result(f"📭 用户 {target_uid} 没有绑定账号。")
-                self._update_state(user_id, menu='admin', step=None)
-                self._schedule_timeout(user_id)
-                yield event.plain_result(self._admin_menu())
-                return
-            lines = [f"{idx+1}. {a['phone']}" for idx, a in enumerate(accounts)]
-            prompt = f"用户 {target_uid} 的账号列表：\n" + "\n".join(lines) + "\n请输入要删除的序号（多个用逗号分隔），输入 0 取消："
-            self._update_state(user_id, step='admin_del_choose', tmp_data={'target_uid': target_uid, 'accounts': accounts})
+        try:
+            idx = int(text) - 1
+        except:
             self._schedule_timeout(user_id)
-            yield event.plain_result(prompt)
-        elif step == 'admin_mod_limit_user':
-            self._update_state(user_id, step='admin_mod_limit_value', tmp_data={'target_uid': target_uid})
-            self._schedule_timeout(user_id)
-            yield event.plain_result(f"请输入用户 {target_uid} 的新授权次数（输入 -1 表示无限制）：")
-        elif step == 'admin_reset_user':
-            self._update_state(user_id, step='admin_reset_confirm', tmp_data={'target_uid': target_uid})
-            self._schedule_timeout(user_id)
-            yield event.plain_result(f"⚠️ 即将重置用户 {target_uid} 的所有数据（包括账号、授权次数、验证码缓存等），确定继续？(y/n)")
+            yield event.plain_result("❌ 请输入有效的数字序号。")
+            return
 
+        all_users = state.get('tmp_data', {}).get('all_users', [])
+        if idx < 0 or idx >= len(all_users):
+            self._schedule_timeout(user_id)
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(all_users)} 之间的数字。")
+            return
+
+        target_uid = all_users[idx]
+        all_data = await self._load_all_data()
+        accounts = all_data[target_uid].get('accounts', [])
+        if not accounts:
+            self._schedule_timeout(user_id)
+            yield event.plain_result(f"📭 用户 {target_uid} 没有绑定账号。")
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+
+        lines = [f"{idx+1}. {a['phone']}" for idx, a in enumerate(accounts)]
+        prompt = f"用户 {target_uid} 的账号列表：\n" + "\n".join(lines) + "\n请输入要删除的序号（多个用逗号分隔），输入 0 取消："
+        self._update_state(user_id, step='admin_del_choose', tmp_data={'target_uid': target_uid, 'accounts': accounts})
+        self._schedule_timeout(user_id)
+        yield event.plain_result(prompt)
+
+    # 删除账号 - 选择具体账号
     @filter.regex(r'^[\d,]+$')
     async def handle_admin_del_choose(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1245,6 +1301,42 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
+    # 修改授权次数 - 选择用户
+    @filter.regex(r'^\d+$')
+    async def handle_admin_mod_limit_select(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_mod_limit_select':
+            return
+
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+
+        try:
+            idx = int(text) - 1
+        except:
+            self._schedule_timeout(user_id)
+            yield event.plain_result("❌ 请输入有效的数字序号。")
+            return
+
+        all_users = state.get('tmp_data', {}).get('all_users', [])
+        if idx < 0 or idx >= len(all_users):
+            self._schedule_timeout(user_id)
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(all_users)} 之间的数字。")
+            return
+
+        target_uid = all_users[idx]
+        self._update_state(user_id, step='admin_mod_limit_value', tmp_data={'target_uid': target_uid})
+        self._schedule_timeout(user_id)
+        yield event.plain_result(f"已选择用户 {target_uid}，请输入新的授权次数（输入 -1 表示无限制）：")
+
+    # 修改授权次数 - 输入值
     @filter.regex(r'^-?\d+$')
     async def handle_admin_mod_limit_value(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1277,6 +1369,42 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
+    # 重置数据 - 选择用户
+    @filter.regex(r'^\d+$')
+    async def handle_admin_reset_select(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_reset_select':
+            return
+
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+
+        try:
+            idx = int(text) - 1
+        except:
+            self._schedule_timeout(user_id)
+            yield event.plain_result("❌ 请输入有效的数字序号。")
+            return
+
+        all_users = state.get('tmp_data', {}).get('all_users', [])
+        if idx < 0 or idx >= len(all_users):
+            self._schedule_timeout(user_id)
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(all_users)} 之间的数字。")
+            return
+
+        target_uid = all_users[idx]
+        self._update_state(user_id, step='admin_reset_confirm', tmp_data={'target_uid': target_uid})
+        self._schedule_timeout(user_id)
+        yield event.plain_result(f"⚠️ 即将重置用户 {target_uid} 的所有数据（包括账号、授权次数、验证码缓存等），确定继续？(y/n)")
+
+    # 确认操作
     @filter.regex(r'^[yYnN]$')
     async def handle_admin_confirm(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1343,7 +1471,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.4.2 修复消息重复处理版已加载")
+        logger.info("✅ 酷我插件 2.5.0 完整版（含加密常量）已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
