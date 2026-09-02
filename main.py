@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（发送验证码支持 all）
+# 3. AstrBot 插件主类（统一所有序号为带圈数字）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -390,6 +390,9 @@ class KuwoPlugin(Star):
 
         self.scheduler_task = None
         self.scheduler_running = False
+
+        # 带圈数字映射（最多支持9个，如有更多可扩展）
+        self.num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
     # ---------- 数据持久化 ----------
     async def _load_all_data(self) -> dict:
@@ -1540,7 +1543,7 @@ class KuwoPlugin(Star):
                 lines.append(f"👤 {uid} -> 暂无提现记录")
         return "📋 最近提现记录：\n" + "\n\n".join(lines)
 
-    # ---------- 管理员菜单主处理器 ----------
+    # ---------- 管理员菜单主处理器（统一序号样式） ----------
     @filter.regex(r'^[0-7]$')
     async def handle_admin_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -1585,7 +1588,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
-        elif text == "2":  # 删除账号
+        elif text == "2":  # 删除账号（带圈序号）
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1599,16 +1602,17 @@ class KuwoPlugin(Star):
                 accounts = udata.get('accounts', [])
                 auth_limit = udata.get('auth_limit', 0)
                 auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
+                emoji = self.num_emojis[idx-1] if idx <= len(self.num_emojis) else f"{idx}."
                 if accounts:
                     phones_lines = "\n   ".join([f"📱 {p}" for p in [a['phone'] for a in accounts]])
-                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
+                    user_list.append(f"{emoji} QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
-                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
+                    user_list.append(f"{emoji} QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
             prompt = "请选择要删除账号的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
             self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "3":  # 修改授权
+        elif text == "3":  # 修改授权（带圈序号）
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1622,16 +1626,17 @@ class KuwoPlugin(Star):
                 accounts = udata.get('accounts', [])
                 auth_limit = udata.get('auth_limit', 0)
                 auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
+                emoji = self.num_emojis[idx-1] if idx <= len(self.num_emojis) else f"{idx}."
                 if accounts:
                     phones_lines = "\n   ".join([f"📱 {p}" for p in [a['phone'] for a in accounts]])
-                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
+                    user_list.append(f"{emoji} QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
-                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
+                    user_list.append(f"{emoji} QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
             prompt = "请选择要修改授权次数的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
             self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "4":  # 发送验证码（支持 all）
+        elif text == "4":  # 发送验证码（带圈序号，支持 all）
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1645,11 +1650,12 @@ class KuwoPlugin(Star):
                 accounts = udata.get('accounts', [])
                 auth_limit = udata.get('auth_limit', 0)
                 auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
+                emoji = self.num_emojis[idx-1] if idx <= len(self.num_emojis) else f"{idx}."
                 if accounts:
                     phones_lines = "\n   ".join([f"📱 {p}" for p in [a['phone'] for a in accounts]])
-                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
+                    user_list.append(f"{emoji} QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
-                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
+                    user_list.append(f"{emoji} QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
             prompt = "请选择要发送验证码的用户序号（输入 all 发送全部）：\n" + "\n".join(user_list) + "\n请输入序号或 all，输入 0 取消："
             self._update_state(user_id, step='admin_send_code_select_user', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
@@ -1658,7 +1664,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_bind_user')
             self._schedule_timeout(user_id)
             yield event.plain_result("请输入要绑定账号的目标用户QQ号：")
-        elif text == "6":  # 重置数据
+        elif text == "6":  # 重置数据（带圈序号）
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1672,11 +1678,12 @@ class KuwoPlugin(Star):
                 accounts = udata.get('accounts', [])
                 auth_limit = udata.get('auth_limit', 0)
                 auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
+                emoji = self.num_emojis[idx-1] if idx <= len(self.num_emojis) else f"{idx}."
                 if accounts:
                     phones_lines = "\n   ".join([f"📱 {p}" for p in [a['phone'] for a in accounts]])
-                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
+                    user_list.append(f"{emoji} QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
-                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
+                    user_list.append(f"{emoji} QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
             prompt = "请选择要重置数据的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
             self._update_state(user_id, step='admin_reset_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
@@ -1730,7 +1737,10 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
 
-        lines = [f"{idx+1}. {a['phone']}" for idx, a in enumerate(accounts)]
+        lines = []
+        for i, acc in enumerate(accounts, 1):
+            emoji = self.num_emojis[i-1] if i <= len(self.num_emojis) else f"{i}."
+            lines.append(f"{emoji} {acc['phone']}")
         prompt = f"用户 {target_uid} 的账号列表：\n" + "\n".join(lines) + "\n请输入要删除的序号（多个用逗号分隔），输入 0 取消："
         self._update_state(user_id, step='admin_del_choose', tmp_data={'target_uid': target_uid, 'accounts': accounts})
         setattr(event, '_admin_sub_processed', True)
@@ -1862,7 +1872,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    # ========== 修改：发送验证码 - 选择用户（支持 all） ==========
+    # ========== 发送验证码 - 选择用户（支持 all，带圈序号） ==========
     @filter.regex(r'^(all|\d+)$')
     async def handle_admin_send_code_select_user(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1879,7 +1889,7 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
 
-        # ========== 处理 all：给所有用户的所有账号发送验证码 ==========
+        # all 逻辑
         if text == "all":
             all_data = await self._load_all_data()
             if not all_data:
@@ -1890,7 +1900,6 @@ class KuwoPlugin(Star):
                 yield event.plain_result(self._admin_menu())
                 return
 
-            # 收集所有需要发送的账号
             all_phones = []
             for uid, udata in all_data.items():
                 accounts = udata.get('accounts', [])
@@ -1913,11 +1922,6 @@ class KuwoPlugin(Star):
                 yield event.plain_result(self._admin_menu())
                 return
 
-            # 并发发送
-            results = []
-            total_success = 0
-            total_fail = 0
-
             async def send_for_all(phone_info):
                 phone = phone_info["phone"]
                 password = phone_info["password"]
@@ -1931,6 +1935,9 @@ class KuwoPlugin(Star):
 
             tasks = [send_for_all(p) for p in all_phones]
             task_results = await asyncio.gather(*tasks)
+            results = []
+            total_success = 0
+            total_fail = 0
             for phone, msg, success in task_results:
                 if success:
                     total_success += 1
@@ -1947,7 +1954,7 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
 
-        # ========== 处理数字：选择单个用户 ==========
+        # 单个用户
         try:
             idx = int(text) - 1
         except:
@@ -1972,7 +1979,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
 
-        # 注意：限制账号数量不超过授权次数
         auth_limit = all_data[target_uid].get('auth_limit', 0)
         if auth_limit == 0:
             self._schedule_timeout(user_id)
@@ -1983,7 +1989,10 @@ class KuwoPlugin(Star):
             return
         display_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
 
-        lines = [f"{idx+1}. {a['phone']}" for idx, a in enumerate(display_accounts)]
+        lines = []
+        for i, acc in enumerate(display_accounts, 1):
+            emoji = self.num_emojis[i-1] if i <= len(self.num_emojis) else f"{i}."
+            lines.append(f"{emoji} {acc['phone']}")
         prompt = f"用户 {target_uid} 的账号列表：\n" + "\n".join(lines) + "\n请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 取消："
         self._update_state(user_id, step='admin_send_code_select_account', tmp_data={'target_uid': target_uid, 'accounts': display_accounts})
         setattr(event, '_admin_sub_processed', True)
@@ -2226,7 +2235,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.10.4 发送验证码支持 all 版已加载")
+        logger.info("✅ 酷我插件 2.10.5 统一序号样式版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
