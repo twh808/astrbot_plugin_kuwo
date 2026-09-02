@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（修复版）
+# 3. AstrBot 插件主类（最终修复版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -493,13 +493,9 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 主菜单数字选择 ----------
+    # ---------- 主菜单数字选择（无冲突标记） ----------
     @filter.regex(r'^[0-8]$')
     async def handle_main_choice(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-        setattr(event, '_menu_choice_processed', True)
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('menu') != 'main' or state.get('step'):
@@ -624,13 +620,9 @@ class KuwoPlugin(Star):
         yield event.plain_result(summary + "\n".join(results))
         yield event.plain_result(self._main_menu())
 
-    # ---------- 验证码子菜单 ----------
+    # ---------- 验证码子菜单（无冲突标记） ----------
     @filter.regex(r'^[0-3]$')
     async def handle_verify_choice(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-        setattr(event, '_menu_choice_processed', True)
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('menu') != 'verify' or state.get('step'):
@@ -651,9 +643,7 @@ class KuwoPlugin(Star):
             if result_msg:
                 yield event.plain_result(result_msg)
             else:
-                # 若返回空，给个友好提示
                 yield event.plain_result("⚠️ 内部错误，未能获取验证码菜单，请重试或重新绑定账号。")
-            # 注意：不返回主菜单，因为 _do_send_code 已经设置状态
             return
 
         elif text == "2":
@@ -707,7 +697,7 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 发送验证码（核心修复） ----------
+    # ---------- 发送验证码（核心函数） ----------
     async def _do_send_code(self, user_id: str) -> str:
         logger.info(f"🟢 _do_send_code 被调用，用户 {user_id}")
         user_data = await self._load_data(user_id)
@@ -734,9 +724,6 @@ class KuwoPlugin(Star):
     # ---------- 处理发送验证码的选择（支持取消） ----------
     @filter.regex(r'^(all|[\d,]+|0|q|Q)$')
     async def handle_send_select(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_send_select':
@@ -806,9 +793,6 @@ class KuwoPlugin(Star):
     # ---------- 提交验证码 - 选择账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_code_phone':
@@ -936,9 +920,6 @@ class KuwoPlugin(Star):
     # ---------- 删除账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
-        if getattr(event, '_menu_choice_processed', False):
-            return
-
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_delete':
@@ -993,7 +974,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.2.4 修复版已加载")
+        logger.info("✅ 酷我插件 2.2.4 最终修复版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
