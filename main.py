@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（精简主菜单版）
+# 3. AstrBot 插件主类（完整功能）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -467,7 +467,7 @@ class KuwoPlugin(Star):
             "1️⃣ 账号管理\n"
             "2️⃣ 获取验证码\n"
             "3️⃣ 提交验证码\n"
-            "4️⃣ 立即提现\n"
+            "4️⃣ 提现\n"
             "0️⃣ 退出"
         )
 
@@ -489,16 +489,24 @@ class KuwoPlugin(Star):
             "0️⃣ 返回主菜单"
         )
 
+    def _withdraw_menu(self) -> str:
+        return (
+            "💳 提现\n"
+            "1️⃣ 立即提现\n"
+            "2️⃣ 定时提现\n"
+            "0️⃣ 返回主菜单"
+        )
+
     # ---------- 命令入口（重置状态） ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
-        self._clear_state(user_id)  # 清除旧状态
+        self._clear_state(user_id)
         self._update_state(user_id, menu='main', step=None, umo=event.unified_msg_origin)
         self._schedule_timeout(user_id)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 主菜单数字选择（仅 0-4） ----------
+    # ---------- 主菜单数字选择 ----------
     @filter.regex(r'^[0-4]$')
     async def handle_main_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -532,7 +540,36 @@ class KuwoPlugin(Star):
             yield event.plain_result(prompt)
             self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
         elif text == "4":
-            await self._do_withdraw(user_id, event)
+            self._update_state(user_id, menu='withdraw', step=None)
+            yield event.plain_result(self._withdraw_menu())
+
+    # ---------- 提现子菜单 ----------
+    @filter.regex(r'^[0-2]$')
+    async def handle_withdraw_choice(self, event: AstrMessageEvent):
+        if getattr(event, '_main_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('menu') != 'withdraw' or state.get('step'):
+            return
+
+        self._cancel_timeout(user_id)
+        self._schedule_timeout(user_id)
+
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='main', step=None)
+            yield event.plain_result(self._main_menu())
+            return
+        elif text == "1":  # 立即提现
+            result = await self._do_withdraw(user_id, event)
+            yield event.plain_result(result)
+            # 提现完成后已包含主菜单，但为确保状态清理，设回主菜单
+            self._update_state(user_id, menu='main', step=None)
+        elif text == "2":  # 定时提现（预留）
+            yield event.plain_result("⏰ 定时提现功能开发中，敬请期待！")
+            self._update_state(user_id, menu='withdraw', step=None)
+            yield event.plain_result(self._withdraw_menu())
 
     # ---------- 账号管理子菜单 ----------
     @filter.regex(r'^[0-3]$')
@@ -917,17 +954,14 @@ class KuwoPlugin(Star):
         else:
             yield event.plain_result("👋 已退出")
 
-    # ---------- 提现逻辑 ----------
-    async def _do_withdraw(self, user_id: str, event: AstrMessageEvent):
+    # ---------- 提现逻辑（普通异步函数，返回字符串） ----------
+    async def _do_withdraw(self, user_id: str, event: AstrMessageEvent) -> str:
+        """执行提现，返回结果字符串（非生成器）"""
         user_data = await self._load_data(user_id)
         if not user_data["accounts"]:
-            yield event.plain_result("❌ 请先绑定账号")
-            yield event.plain_result(self._main_menu())
-            return
+            return "❌ 请先绑定账号\n" + self._main_menu()
         if user_data["auth_limit"] <= 0:
-            yield event.plain_result("❌ 授权次数已用完")
-            yield event.plain_result(self._main_menu())
-            return
+            return "❌ 授权次数已用完\n" + self._main_menu()
 
         accounts = user_data["accounts"][:user_data["auth_limit"]]
         results = []
@@ -971,12 +1005,11 @@ class KuwoPlugin(Star):
                 results.append(f"❌ 提现失败 {phone}: {final_msg}")
 
         summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {user_data['auth_limit']}\n━━━━━━━━━━━━\n"
-        yield event.plain_result(summary + "\n".join(results))
-        yield event.plain_result(self._main_menu())
+        return summary + "\n".join(results) + "\n" + self._main_menu()
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.2.7 精简菜单版已加载")
+        logger.info("✅ 酷我插件 2.2.9 完整版（含提现子菜单）已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
