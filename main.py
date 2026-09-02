@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（新增提现日志存储与管理员查看）
+# 3. AstrBot 插件主类（超时改为 300 秒）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -378,7 +378,8 @@ class KuwoPlugin(Star):
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
-        self.timeout = self.config.get('timeout', 120)
+        # 超时时间改为 300 秒（5 分钟）
+        self.timeout = self.config.get('timeout', 300)
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
         self.quota_id = self.config.get('quota_id', "60004")
@@ -417,7 +418,7 @@ class KuwoPlugin(Star):
                     "enabled": True,
                     "last_executed": None
                 },
-                "last_withdraw_log": None  # 存储最近一次提现日志
+                "last_withdraw_log": None
             }
         else:
             if "withdraw_scheduled_job" not in all_data[user_id]:
@@ -1534,9 +1535,7 @@ class KuwoPlugin(Star):
             log = udata.get('last_withdraw_log')
             if log:
                 time_str = log.get('time', '未知时间')
-                # 提取结果摘要（取前200字符）
                 result = log.get('result', '')
-                # 简单摘要：取第一行（可能包含成功/失败数量）
                 lines.append(f"👤 {uid}\n   🕐 {time_str}\n   📝 {result[:200]}{'...' if len(result)>200 else ''}")
             else:
                 lines.append(f"👤 {uid} -> 暂无提现记录")
@@ -2153,7 +2152,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.10.0 提现日志功能已加载")
+        logger.info("✅ 酷我插件 2.10.1 超时改为5分钟版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
