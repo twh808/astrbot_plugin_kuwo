@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（最终整合版，含状态重置）
+# 3. AstrBot 插件主类（精简主菜单版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -467,9 +467,7 @@ class KuwoPlugin(Star):
             "1️⃣ 账号管理\n"
             "2️⃣ 获取验证码\n"
             "3️⃣ 提交验证码\n"
-            "4️⃣ 设置定时规则\n"
-            "5️⃣ 立即提现\n"
-            "6️⃣ 帮助\n"
+            "4️⃣ 立即提现\n"
             "0️⃣ 退出"
         )
 
@@ -491,19 +489,17 @@ class KuwoPlugin(Star):
             "0️⃣ 返回主菜单"
         )
 
-    # ---------- 命令入口（每次调用均重置状态） ----------
+    # ---------- 命令入口（重置状态） ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
-        # 清除该用户的所有旧状态，防止干扰
-        self._clear_state(user_id)
-        # 重新设置新的主菜单状态
+        self._clear_state(user_id)  # 清除旧状态
         self._update_state(user_id, menu='main', step=None, umo=event.unified_msg_origin)
         self._schedule_timeout(user_id)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 主菜单数字选择 ----------
-    @filter.regex(r'^[0-6]$')
+    # ---------- 主菜单数字选择（仅 0-4） ----------
+    @filter.regex(r'^[0-4]$')
     async def handle_main_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -536,14 +532,7 @@ class KuwoPlugin(Star):
             yield event.plain_result(prompt)
             self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
         elif text == "4":
-            self._update_state(user_id, step='set_cron')
-            current_cron = (await self._load_data(user_id)).get("cron", "未设置")
-            yield event.plain_result(f"📝 当前定时规则：{current_cron}\n请输入新的cron表达式（格式：秒 分 时 日 月 周）\n例如：12 55 8,12,16,19 * * *\n输入 0 取消，输入 off 关闭定时。")
-        elif text == "5":
             await self._do_withdraw(user_id, event)
-        elif text == "6":
-            yield event.plain_result("帮助：发送“酷我”进入菜单，回复数字操作。\n120秒无操作自动退出。")
-            yield event.plain_result(self._main_menu())
 
     # ---------- 账号管理子菜单 ----------
     @filter.regex(r'^[0-3]$')
@@ -987,7 +976,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.2.6 最终版（含状态重置）已加载")
+        logger.info("✅ 酷我插件 2.2.7 精简菜单版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
