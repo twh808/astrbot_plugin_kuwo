@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（超时改为 300 秒）
+# 3. AstrBot 插件主类（优化管理面板显示）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -378,7 +378,6 @@ class KuwoPlugin(Star):
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
-        # 超时时间改为 300 秒（5 分钟）
         self.timeout = self.config.get('timeout', 300)
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
@@ -1541,7 +1540,7 @@ class KuwoPlugin(Star):
                 lines.append(f"👤 {uid} -> 暂无提现记录")
         return "📋 最近提现记录：\n" + "\n\n".join(lines)
 
-    # ---------- 管理员菜单主处理器 ----------
+    # ---------- 管理员菜单主处理器（优化显示） ----------
     @filter.regex(r'^[0-7]$')
     async def handle_admin_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -1607,7 +1606,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "3":  # 修改授权
+        elif text == "3":  # 修改授权（优化显示）
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1619,11 +1618,13 @@ class KuwoPlugin(Star):
             user_list = []
             for idx, (uid, udata) in enumerate(all_data.items(), 1):
                 accounts = udata.get('accounts', [])
+                auth_limit = udata.get('auth_limit', 0)
+                auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
                 if accounts:
-                    phones = ', '.join([a['phone'] for a in accounts])
-                    user_list.append(f"{idx}. {uid} -> {phones}")
+                    phones_lines = "\n   ".join([f"📱 {p}" for p in [a['phone'] for a in accounts]])
+                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
-                    user_list.append(f"{idx}. {uid} -> (无账号)")
+                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
             prompt = "请选择要修改授权次数的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
             self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
@@ -2152,7 +2153,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.10.1 超时改为5分钟版已加载")
+        logger.info("✅ 酷我插件 2.10.2 优化管理面板显示版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
