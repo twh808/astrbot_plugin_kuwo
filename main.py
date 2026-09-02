@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类
+# 3. AstrBot 插件主类（完整功能 + 秒级定时）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -739,7 +739,6 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._verify_timer_menu())
         elif text == "2":
-            # 设置定时规则 - 标记此消息已处理
             setattr(event, '_timer_choice_processed', True)
             self._update_state(user_id, step='set_timer_cron')
             self._schedule_timeout(user_id)
@@ -769,10 +768,9 @@ class KuwoPlugin(Star):
             yield event.plain_result("⏳ 正在执行定时任务，请稍候...")
             asyncio.create_task(self._execute_scheduled_job(user_id, is_manual=True))
 
-    # ========== 定时任务设置：输入 cron 表达式（修复重复处理） ==========
+    # ========== 定时任务设置：输入 cron 表达式 ==========
     @filter.regex(r'^.+$')
     async def handle_set_timer_cron(self, event: AstrMessageEvent):
-        # 如果消息已被定时菜单处理器处理，则跳过
         if getattr(event, '_timer_choice_processed', False):
             return
         user_id = event.get_sender_id()
@@ -787,14 +785,12 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._verify_timer_menu())
             return
 
-        # 验证 cron 表达式（5或6个字段）
         parts = text.split()
         if len(parts) not in (5, 6):
             self._schedule_timeout(user_id)
             yield event.plain_result("❌ cron表达式格式错误，应为5或6个字段，请重新输入")
             return
 
-        # 验证每个字段是否合法（允许 *, 数字, 逗号, 范围, 步长）
         valid_pattern = re.compile(r'^(\*|\d+|[,\d-]+|(\*|\d+)/\d+|\d+-\d+)$')
         for part in parts:
             if not valid_pattern.match(part):
@@ -802,7 +798,6 @@ class KuwoPlugin(Star):
                 yield event.plain_result(f"❌ 字段 '{part}' 格式无效，请重新输入")
                 return
 
-        # 保存定时任务
         user_data = await self._load_data(user_id)
         user_data['scheduled_job'] = {
             "cron": text,
@@ -1246,9 +1241,9 @@ class KuwoPlugin(Star):
         main_menu = await self._get_main_menu_text(user_id)
         return summary + "\n".join(results) + "\n" + main_menu
 
-    # ========== 定时任务核心功能 ==========
+    # ========== 定时任务核心功能（秒级精度） ==========
     def _parse_cron(self, cron_expr: str) -> dict:
-        """解析cron表达式，返回各字段列表，支持 *, 数字, 逗号, 范围(1-5), 步长(*/5)"""
+        """解析cron表达式，支持秒级，返回字段值列表"""
         parts = cron_expr.split()
         if len(parts) == 5:
             parts = ['*'] + parts  # 补秒
@@ -1256,29 +1251,23 @@ class KuwoPlugin(Star):
         result = {}
         for i, part in enumerate(parts):
             if part == '*':
-                result[fields[i]] = None  # 表示匹配任意值
+                result[fields[i]] = None
             else:
-                # 解析可能包含范围或步长的部分
                 values = set()
                 if '/' in part:
-                    # 步长格式，如 */5 或 0-30/2
                     base, step = part.split('/')
                     step = int(step)
                     if base == '*':
-                        # 根据字段确定范围
                         max_val = {'second': 59, 'minute': 59, 'hour': 23, 'day': 31, 'month': 12, 'weekday': 7}[fields[i]]
                         values = set(range(0, max_val+1, step))
                     else:
-                        # 解析范围
                         if '-' in base:
                             start, end = base.split('-')
                             start, end = int(start), int(end)
                             values = set(range(start, end+1, step))
                         else:
-                            # 单个数字 + 步长（实际上无效，但兼容）
                             values = {int(base)}
                 elif '-' in part:
-                    # 范围，如 1-5
                     start, end = part.split('-')
                     start, end = int(start), int(end)
                     values = set(range(start, end+1))
@@ -1290,7 +1279,7 @@ class KuwoPlugin(Star):
         return result
 
     def _match_cron(self, cron_dict: dict, dt: datetime) -> bool:
-        """检查当前时间是否匹配cron字典"""
+        """检查当前时间是否匹配 cron 字典（精确到秒）"""
         for field, values in cron_dict.items():
             if values is None:
                 continue
@@ -1315,10 +1304,12 @@ class KuwoPlugin(Star):
             user_data = await self._load_data(user_id)
             job = user_data.get('scheduled_job', {})
             if not job.get('cron') or not job.get('enabled'):
+                logger.info(f"用户 {user_id} 定时任务未启用或无规则")
                 return
 
             accounts = user_data.get('accounts', [])
             if not accounts:
+                logger.info(f"用户 {user_id} 无绑定账号，跳过定时任务")
                 return
 
             auth_limit = user_data.get('auth_limit', 0)
@@ -1326,14 +1317,15 @@ class KuwoPlugin(Star):
                 logger.warning(f"用户 {user_id} 授权次数为0，定时任务跳过")
                 return
 
+            # 获取用户的会话对象
             state = self._get_state(user_id)
             umo = state.get('umo')
             if not umo:
-                logger.warning(f"用户 {user_id} 没有可用会话，无法发送定时通知")
-                return
+                # 尝试从所有已知会话中查找（简化处理，仅记录日志）
+                logger.warning(f"用户 {user_id} 没有可用会话，无法发送定时通知，但任务仍会执行")
+                # 即使没有会话，也继续执行任务，仅记录结果
 
             target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
-
             results = []
             for acc in target_accounts:
                 phone = acc['phone']
@@ -1348,25 +1340,32 @@ class KuwoPlugin(Star):
                 results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
                 await asyncio.sleep(0.5)
 
+            # 更新上次执行时间
             user_data['scheduled_job']['last_executed'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             await self._save_data(user_id, user_data)
 
+            # 尝试发送结果通知
             result_msg = f"⏰ 定时获取验证码完成\n" + "\n".join(results)
             if is_manual:
                 result_msg = "🔹 手动执行结果：\n" + result_msg
-            try:
-                await self.context.send_message(umo, MessageChain().message(result_msg))
-            except Exception as e:
-                logger.error(f"发送定时结果失败: {e}")
+            if umo:
+                try:
+                    await self.context.send_message(umo, MessageChain().message(result_msg))
+                except Exception as e:
+                    logger.error(f"发送定时结果失败: {e}")
+            else:
+                logger.info(f"定时任务执行结果（用户 {user_id}）：\n{result_msg}")
 
         except Exception as e:
             logger.error(f"执行定时任务失败: {e}")
 
     async def _scheduler_loop(self):
+        """后台调度循环，每秒检查一次，精确到秒级"""
+        logger.info("🕐 定时调度器开始运行，每秒检查一次")
         while self.scheduler_running:
             try:
-                all_data = await self._load_all_data()
                 now = datetime.now()
+                all_data = await self._load_all_data()
                 for user_id, user_data in all_data.items():
                     job = user_data.get('scheduled_job', {})
                     if not job.get('cron') or not job.get('enabled'):
@@ -1375,17 +1374,19 @@ class KuwoPlugin(Star):
                     if last_exec:
                         try:
                             last_dt = datetime.strptime(last_exec, '%Y-%m-%d %H:%M:%S')
-                            if (now - last_dt).total_seconds() < 60:
+                            # 同一秒内不重复触发
+                            if (now - last_dt).total_seconds() < 1:
                                 continue
                         except:
                             pass
                     cron_dict = self._parse_cron(job['cron'])
                     if self._match_cron(cron_dict, now):
-                        logger.info(f"定时任务触发: 用户 {user_id}, cron: {job['cron']}")
+                        logger.info(f"⏰ 定时任务触发: 用户 {user_id}, cron: {job['cron']}")
                         asyncio.create_task(self._execute_scheduled_job(user_id))
             except Exception as e:
                 logger.error(f"调度循环错误: {e}")
-            await asyncio.sleep(60)
+            # 每秒检查一次
+            await asyncio.sleep(1)
 
     # ---------- 管理员菜单主处理器 ----------
     @filter.regex(r'^[0-6]$')
@@ -1991,10 +1992,10 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.6.1 完整修复版已加载")
+        logger.info("✅ 酷我插件 2.6.2 秒级定时修复版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
-        logger.info("✅ 定时调度器已启动")
+        logger.info("✅ 定时调度器已启动（每秒检查）")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
