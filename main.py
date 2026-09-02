@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（菜单固定文字）
+# 3. AstrBot 插件主类（新增提现日志存储与管理员查看）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -374,7 +374,6 @@ class KuwoPlugin(Star):
         self.config = config or {}
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
         self.verification_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
-        # 默认提现定时 cron（每天 9:00、13:00、17:00、20:00）
         self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 9,13,17,20 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
@@ -389,7 +388,6 @@ class KuwoPlugin(Star):
         self.TIMEOUT = self.timeout
         self.timeout_tasks = {}
 
-        # 定时任务相关
         self.scheduler_task = None
         self.scheduler_running = False
 
@@ -416,12 +414,12 @@ class KuwoPlugin(Star):
                 },
                 "withdraw_scheduled_job": {
                     "cron": self.default_withdraw_cron,
-                    "enabled": True,  # 默认开启
+                    "enabled": True,
                     "last_executed": None
-                }
+                },
+                "last_withdraw_log": None  # 存储最近一次提现日志
             }
         else:
-            # 确保旧用户有 withdraw_scheduled_job 且默认开启
             if "withdraw_scheduled_job" not in all_data[user_id]:
                 all_data[user_id]["withdraw_scheduled_job"] = {
                     "cron": self.default_withdraw_cron,
@@ -433,7 +431,8 @@ class KuwoPlugin(Star):
                     all_data[user_id]["withdraw_scheduled_job"]["enabled"] = True
                 if not all_data[user_id]["withdraw_scheduled_job"].get("cron"):
                     all_data[user_id]["withdraw_scheduled_job"]["cron"] = self.default_withdraw_cron
-
+            if "last_withdraw_log" not in all_data[user_id]:
+                all_data[user_id]["last_withdraw_log"] = None
         await self._save_all_data(all_data)
         return all_data[user_id]
 
@@ -546,7 +545,6 @@ class KuwoPlugin(Star):
             "0️⃣ 返回"
         )
 
-    # ========== 修改点：提现菜单固定文字 ==========
     def _withdraw_menu(self) -> str:
         return (
             "💳 提现\n"
@@ -564,6 +562,7 @@ class KuwoPlugin(Star):
             "4️⃣ 发送验证码（可指定用户和账号）\n"
             "5️⃣ 为指定用户绑定账号\n"
             "6️⃣ 重置用户所有数据\n"
+            "7️⃣ 查看最近提现记录\n"
             "0️⃣ 退出"
         )
 
@@ -860,13 +859,11 @@ class KuwoPlugin(Star):
             user_data = await self._load_data(user_id)
             job = user_data.get('withdraw_scheduled_job', {})
             if job.get('enabled', False):
-                # 当前开启，改为关闭
                 user_data['withdraw_scheduled_job']['enabled'] = False
                 await self._save_data(user_id, user_data)
                 self._schedule_timeout(user_id)
                 yield event.plain_result("✅ 已停用整点提现")
             else:
-                # 当前关闭，改为开启
                 user_data['withdraw_scheduled_job']['enabled'] = True
                 if not user_data['withdraw_scheduled_job'].get('cron'):
                     user_data['withdraw_scheduled_job']['cron'] = self.default_withdraw_cron
@@ -878,7 +875,6 @@ class KuwoPlugin(Star):
                     f"📅 定时规则：{cron}\n"
                     f"🕐 将在匹配时间自动发送提现请求"
                 )
-            # 显示更新后的提现菜单（固定文字）
             self._update_state(user_id, menu='withdraw', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._withdraw_menu())
@@ -1189,11 +1185,10 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出")
 
-    # ---------- 核心提现逻辑（并发版） ----------
+    # ---------- 核心提现逻辑（并发版，记录日志） ----------
     async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None) -> str:
         """
-        执行提现，并发处理多个账号
-        返回结果字符串
+        执行提现，并发处理多个账号，返回结果字符串并记录日志
         """
         user_data = await self._load_data(user_id)
         if not user_data["accounts"]:
@@ -1204,7 +1199,6 @@ class KuwoPlugin(Star):
         if auth_limit < 0 and auth_limit != -1:
             return "❌ 授权次数无效"
 
-        # 获取要处理的账号列表
         all_accounts = user_data["accounts"]
         if auth_limit != -1:
             accounts = all_accounts[:auth_limit]
@@ -1215,19 +1209,16 @@ class KuwoPlugin(Star):
             return "❌ 没有可用的账号"
 
         codes = user_data.get("verification_codes", {})
-        # 预处理：过滤出有有效验证码的账号
         valid_accounts = []
         for acc in accounts:
             phone = acc["phone"]
             code_info = codes.get(phone)
             if code_info and time.time() <= code_info.get("expire", 0):
                 valid_accounts.append(acc)
-            # 无验证码的账号直接跳过，记录结果
 
         if not valid_accounts:
             return "❌ 所有账号均未配置有效验证码，请先获取验证码"
 
-        # 并发执行每个账号的提现
         async def withdraw_single(acc):
             phone = acc["phone"]
             password = acc["password"]
@@ -1235,19 +1226,16 @@ class KuwoPlugin(Star):
             if not code_info:
                 return (phone, None, "跳过（无验证码）", False)
 
-            # 登录
             login_result = login_kuwo(phone, password)
             if not login_result:
                 return (phone, None, "登录失败", False)
             uid, sid, appuid, _ = login_result
 
-            # 检查今日是否已提现
             if check_withdraw_today(uid, sid):
                 return (phone, None, "今日已提现，跳过", False)
 
             encrypted_phone = encrypt_phone(phone)
             code = code_info["code"]
-            # 使用 to_thread 运行同步函数，不阻塞事件循环
             log_lines, final_msg, is_success = await asyncio.to_thread(
                 withdraw_confirm_once,
                 phone, uid, sid, appuid, encrypted_phone, code,
@@ -1256,11 +1244,9 @@ class KuwoPlugin(Star):
             )
             return (phone, final_msg, final_msg, is_success)
 
-        # 并发执行
         tasks = [withdraw_single(acc) for acc in valid_accounts]
         results = await asyncio.gather(*tasks)
 
-        # 统计结果，更新数据
         success_count = 0
         result_lines = []
         for phone, final_msg, desc, is_success in results:
@@ -1270,23 +1256,19 @@ class KuwoPlugin(Star):
             else:
                 result_lines.append(f"❌ 提现失败 {phone}: {desc}")
 
-        # 如果有跳过的情况（无验证码、今日已提现等），需单独记录
         skipped_phones = [acc["phone"] for acc in accounts if acc["phone"] not in [r[0] for r in results]]
         for phone in skipped_phones:
             result_lines.append(f"⏭️ {phone}: 无有效验证码，已跳过")
 
-        # 更新授权次数
         if success_count > 0 and auth_limit != -1:
             user_data["auth_limit"] -= success_count
             if user_data["auth_limit"] < 0:
                 user_data["auth_limit"] = 0
 
-        # 清除已使用的验证码
         for phone in [r[0] for r in results if r[3]]:
             if phone in user_data["verification_codes"]:
                 del user_data["verification_codes"][phone]
 
-        # 记录 daily_withdraw
         today = datetime.now().strftime("%Y-%m-%d")
         if today not in user_data["daily_withdraw"]:
             user_data["daily_withdraw"][today] = {}
@@ -1294,9 +1276,6 @@ class KuwoPlugin(Star):
             if is_success:
                 user_data["daily_withdraw"][today][phone] = True
 
-        await self._save_data(user_id, user_data)
-
-        # 构建总结
         total = len(accounts)
         summary = (
             f"📊 【提现完成】\n"
@@ -1306,18 +1285,27 @@ class KuwoPlugin(Star):
             f"📈 剩余可用次数: {'无限制' if user_data['auth_limit'] == -1 else user_data['auth_limit']}\n"
             f"━━━━━━━━━━━━\n"
         )
-        return summary + "\n".join(result_lines)
+        full_result = summary + "\n".join(result_lines)
 
-    # ---------- 立即提现（调用公共逻辑） ----------
+        # 存储最近提现日志
+        user_data["last_withdraw_log"] = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": full_result
+        }
+        await self._save_data(user_id, user_data)
+
+        return full_result
+
+    # ---------- 立即提现 ----------
     async def _do_withdraw(self, user_id: str, event: AstrMessageEvent) -> str:
-        """立即提现，并附带主菜单"""
+        """立即提现，发送结果并附带主菜单"""
         result = await self._process_withdraw(user_id, event)
         main_menu = await self._get_main_menu_text(user_id)
         return result + "\n" + main_menu
 
     # ---------- 定时提现任务 ----------
     async def _execute_withdraw_scheduled_job(self, user_id: str):
-        """定时提现任务，发送结果通知"""
+        """定时提现任务，发送结果通知给用户"""
         try:
             user_data = await self._load_data(user_id)
             job = user_data.get('withdraw_scheduled_job', {})
@@ -1325,7 +1313,6 @@ class KuwoPlugin(Star):
                 logger.info(f"用户 {user_id} 提现定时任务未启用或无规则")
                 return
 
-            # 防重
             last_exec = job.get('last_executed')
             if last_exec:
                 try:
@@ -1335,12 +1322,12 @@ class KuwoPlugin(Star):
                 except:
                     pass
 
+            # 执行提现
             result = await self._process_withdraw(user_id, None)
-            # 更新执行时间
             user_data['withdraw_scheduled_job']['last_executed'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             await self._save_data(user_id, user_data)
 
-            # 发送通知
+            # 主动发送给用户
             state = self._get_state(user_id)
             umo = state.get('umo')
             if umo:
@@ -1537,8 +1524,26 @@ class KuwoPlugin(Star):
                 return False
         return True
 
+    # ---------- 管理员查看最近提现记录 ----------
+    async def _view_last_withdraw_logs(self) -> str:
+        all_data = await self._load_all_data()
+        if not all_data:
+            return "📭 暂无用户数据。"
+        lines = []
+        for uid, udata in all_data.items():
+            log = udata.get('last_withdraw_log')
+            if log:
+                time_str = log.get('time', '未知时间')
+                # 提取结果摘要（取前200字符）
+                result = log.get('result', '')
+                # 简单摘要：取第一行（可能包含成功/失败数量）
+                lines.append(f"👤 {uid}\n   🕐 {time_str}\n   📝 {result[:200]}{'...' if len(result)>200 else ''}")
+            else:
+                lines.append(f"👤 {uid} -> 暂无提现记录")
+        return "📋 最近提现记录：\n" + "\n\n".join(lines)
+
     # ---------- 管理员菜单主处理器 ----------
-    @filter.regex(r'^[0-6]$')
+    @filter.regex(r'^[0-7]$')
     async def handle_admin_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -1559,7 +1564,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出管理面板")
             return
-        elif text == "1":
+        elif text == "1":  # 查看所有账号
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1582,7 +1587,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
-        elif text == "2":
+        elif text == "2":  # 删除账号
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1603,7 +1608,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "3":
+        elif text == "3":  # 修改授权
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1624,7 +1629,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "4":
+        elif text == "4":  # 发送验证码
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1645,11 +1650,11 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_send_code_select_user', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "5":
+        elif text == "5":  # 绑定账号
             self._update_state(user_id, step='admin_bind_user')
             self._schedule_timeout(user_id)
             yield event.plain_result("请输入要绑定账号的目标用户QQ号：")
-        elif text == "6":
+        elif text == "6":  # 重置数据
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1670,6 +1675,13 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_reset_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
+        elif text == "7":  # 查看最近提现记录
+            result = await self._view_last_withdraw_logs()
+            self._schedule_timeout(user_id)
+            yield event.plain_result(result)
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
 
     # ---------- 管理员子步骤 ----------
     @filter.regex(r'^\d+$')
@@ -2141,7 +2153,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.9.1 菜单固定文字版已加载")
+        logger.info("✅ 酷我插件 2.10.0 提现日志功能已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
