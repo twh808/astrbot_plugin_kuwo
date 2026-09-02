@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.2.4 版，含完整加密常量）
+# 3. AstrBot 插件主类（修复版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -646,11 +646,14 @@ class KuwoPlugin(Star):
             return
 
         elif text == "1":
-            # 立即获取
+            logger.info(f"用户 {user_id} 选择立即获取验证码")
             result_msg = await self._do_send_code(user_id)
             if result_msg:
                 yield event.plain_result(result_msg)
-            # 返回主菜单
+            else:
+                # 若返回空，给个友好提示
+                yield event.plain_result("⚠️ 内部错误，未能获取验证码菜单，请重试或重新绑定账号。")
+            # 注意：不返回主菜单，因为 _do_send_code 已经设置状态
             return
 
         elif text == "2":
@@ -704,20 +707,32 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 发送验证码 ----------
+    # ---------- 发送验证码（核心修复） ----------
     async def _do_send_code(self, user_id: str) -> str:
+        logger.info(f"🟢 _do_send_code 被调用，用户 {user_id}")
         user_data = await self._load_data(user_id)
-        if not user_data["accounts"]:
-            self._update_state(user_id, menu='main')
-            return "❌ 您还没有绑定任何账号"
+        accounts = user_data.get("accounts", [])
+        logger.info(f"用户 {user_id} 当前账号数量: {len(accounts)}")
 
-        lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
+        if not accounts:
+            logger.warning("账号列表为空")
+            self._update_state(user_id, menu='main', step=None)
+            return "❌ 您还没有绑定任何账号\n" + self._main_menu()
+
+        try:
+            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(accounts)]
+        except Exception as e:
+            logger.error(f"构建账号列表时出错: {e}", exc_info=True)
+            self._update_state(user_id, menu='main', step=None)
+            return "❌ 账号数据格式异常，请重新绑定\n" + self._main_menu()
+
         prompt = "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
-        self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': user_data["accounts"]})
+        self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': accounts})
+        logger.info(f"返回提示: {prompt[:50]}...")
         return prompt
 
-    # ---------- 处理发送验证码的选择 ----------
-    @filter.regex(r'^(all|[\d,]+)$')
+    # ---------- 处理发送验证码的选择（支持取消） ----------
+    @filter.regex(r'^(all|[\d,]+|0|q|Q)$')
     async def handle_send_select(self, event: AstrMessageEvent):
         if getattr(event, '_menu_choice_processed', False):
             return
@@ -728,7 +743,7 @@ class KuwoPlugin(Star):
             return
 
         text = event.message_str.strip().lower()
-        if text == "0":
+        if text in ("0", "q"):
             self._update_state(user_id, menu='verify', step=None)
             yield event.plain_result(self._verify_menu())
             return
@@ -826,7 +841,7 @@ class KuwoPlugin(Star):
         self._update_state(user_id, step='waiting_code_input', tmp_data={'phone': phone})
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
-    # ---------- 提交验证码 - 输入验证码 ----------
+    # ---------- 提交验证码 - 输入验证码（支持取消） ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -835,7 +850,7 @@ class KuwoPlugin(Star):
             return
 
         text = event.message_str.strip()
-        if text == "0":
+        if text in ("0", "q", "Q"):
             self._update_state(user_id, menu='main', step=None)
             yield event.plain_result(self._main_menu())
             return
@@ -963,7 +978,7 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 全局 q 退出 ----------
+    # ---------- 全局 q 退出（优化） ----------
     @filter.regex(r'^[qQ]$')
     async def handle_global_q(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -971,13 +986,14 @@ class KuwoPlugin(Star):
 
         if state.get('step') or state.get('menu'):
             self._clear_state(user_id)
-            yield event.plain_result("👋 已退出当前操作")
+            yield event.plain_result("👋 已取消当前操作，返回主菜单")
+            yield event.plain_result(self._main_menu())
         else:
             yield event.plain_result("👋 已退出")
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.2.4 版已加载")
+        logger.info("✅ 酷我插件 2.2.4 修复版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
