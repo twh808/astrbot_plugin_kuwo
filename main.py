@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（优化管理面板显示）
+# 3. AstrBot 插件主类（优化所有管理面板列表显示）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -1540,7 +1540,7 @@ class KuwoPlugin(Star):
                 lines.append(f"👤 {uid} -> 暂无提现记录")
         return "📋 最近提现记录：\n" + "\n\n".join(lines)
 
-    # ---------- 管理员菜单主处理器（优化显示） ----------
+    # ---------- 管理员菜单主处理器（优化所有列表显示） ----------
     @filter.regex(r'^[0-7]$')
     async def handle_admin_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -1585,7 +1585,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
-        elif text == "2":  # 删除账号
+        elif text == "2":  # 删除账号 - 优化列表
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1597,16 +1597,18 @@ class KuwoPlugin(Star):
             user_list = []
             for idx, (uid, udata) in enumerate(all_data.items(), 1):
                 accounts = udata.get('accounts', [])
+                auth_limit = udata.get('auth_limit', 0)
+                auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
                 if accounts:
-                    phones = ', '.join([a['phone'] for a in accounts])
-                    user_list.append(f"{idx}. {uid} -> {phones}")
+                    phones_lines = "\n   ".join([f"📱 {p}" for p in [a['phone'] for a in accounts]])
+                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
-                    user_list.append(f"{idx}. {uid} -> (无账号)")
+                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
             prompt = "请选择要删除账号的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
             self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "3":  # 修改授权（优化显示）
+        elif text == "3":  # 修改授权 - 已优化
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1629,7 +1631,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "4":  # 发送验证码
+        elif text == "4":  # 发送验证码 - 优化列表
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1641,11 +1643,13 @@ class KuwoPlugin(Star):
             user_list = []
             for idx, (uid, udata) in enumerate(all_data.items(), 1):
                 accounts = udata.get('accounts', [])
+                auth_limit = udata.get('auth_limit', 0)
+                auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
                 if accounts:
-                    phones = ', '.join([a['phone'] for a in accounts])
-                    user_list.append(f"{idx}. {uid} -> {phones}")
+                    phones_lines = "\n   ".join([f"📱 {p}" for p in [a['phone'] for a in accounts]])
+                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
-                    user_list.append(f"{idx}. {uid} -> (无账号)")
+                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
             prompt = "请选择要发送验证码的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
             self._update_state(user_id, step='admin_send_code_select_user', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
@@ -1654,7 +1658,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_bind_user')
             self._schedule_timeout(user_id)
             yield event.plain_result("请输入要绑定账号的目标用户QQ号：")
-        elif text == "6":  # 重置数据
+        elif text == "6":  # 重置数据 - 优化列表
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1666,11 +1670,13 @@ class KuwoPlugin(Star):
             user_list = []
             for idx, (uid, udata) in enumerate(all_data.items(), 1):
                 accounts = udata.get('accounts', [])
+                auth_limit = udata.get('auth_limit', 0)
+                auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
                 if accounts:
-                    phones = ', '.join([a['phone'] for a in accounts])
-                    user_list.append(f"{idx}. {uid} -> {phones}")
+                    phones_lines = "\n   ".join([f"📱 {p}" for p in [a['phone'] for a in accounts]])
+                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
-                    user_list.append(f"{idx}. {uid} -> (无账号)")
+                    user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
             prompt = "请选择要重置数据的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
             self._update_state(user_id, step='admin_reset_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
@@ -2153,7 +2159,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.10.2 优化管理面板显示版已加载")
+        logger.info("✅ 酷我插件 2.10.3 统一管理面板列表显示版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
