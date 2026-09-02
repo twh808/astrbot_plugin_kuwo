@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类
+# 3. AstrBot 插件主类（新增管理员为指定用户绑定账号）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -523,6 +523,7 @@ class KuwoPlugin(Star):
             "3️⃣ 修改授权次数（设置具体值或无限制）\n"
             "4️⃣ 发送验证码（全部账号）\n"
             "5️⃣ 重置用户所有数据\n"
+            "6️⃣ 为指定用户绑定账号\n"
             "0️⃣ 退出"
         )
 
@@ -1018,8 +1019,6 @@ class KuwoPlugin(Star):
         logger.info(f"🟢 _do_send_code 被调用，用户 {user_id}")
         user_data = await self._load_data(user_id)
         auth_limit = user_data.get('auth_limit', 0)
-        
-        # ====== 授权次数为 0 时禁止获取验证码 ======
         if auth_limit == 0:
             logger.warning(f"用户 {user_id} 授权次数为0，无法获取验证码")
             self._update_state(user_id, menu='main', step=None)
@@ -1050,17 +1049,14 @@ class KuwoPlugin(Star):
         if not user_data["accounts"]:
             main_menu = await self._get_main_menu_text(user_id)
             return "❌ 请先绑定账号\n" + main_menu
-        # 检查授权次数：0 或负数（但 -1 为无限制）
         auth_limit = user_data.get('auth_limit', 0)
         if auth_limit == 0:
             main_menu = await self._get_main_menu_text(user_id)
             return "❌ 授权次数已用完，无法提现\n" + main_menu
         if auth_limit < 0 and auth_limit != -1:
-            # 如果出现其他负数（理论上不会），视为0
             main_menu = await self._get_main_menu_text(user_id)
             return "❌ 授权次数无效\n" + main_menu
 
-        # 确定可用账号列表：如果 auth_limit == -1 则全部，否则取前 auth_limit 个
         accounts = user_data["accounts"][:auth_limit] if auth_limit != -1 else user_data["accounts"]
         results = []
         success_count = 0
@@ -1103,7 +1099,7 @@ class KuwoPlugin(Star):
         return summary + "\n".join(results) + "\n" + main_menu
 
     # ---------- 管理员菜单主处理器 ----------
-    @filter.regex(r'^[0-5]$')
+    @filter.regex(r'^[0-6]$')
     async def handle_admin_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -1214,8 +1210,13 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_reset_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
+        elif text == "6":  # 为指定用户绑定账号
+            self._update_state(user_id, step='admin_bind_user')
+            self._schedule_timeout(user_id)
+            yield event.plain_result("请输入要绑定账号的目标用户QQ号：")
 
     # ---------- 管理员子步骤 ----------
+    # 删除账号 - 选择用户
     @filter.regex(r'^\d+$')
     async def handle_admin_del_select(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1321,6 +1322,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
+    # 修改授权 - 选择用户
     @filter.regex(r'^\d+$')
     async def handle_admin_mod_limit_select(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1388,6 +1390,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
+    # 重置数据 - 选择用户
     @filter.regex(r'^\d+$')
     async def handle_admin_reset_select(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1423,6 +1426,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"⚠️ 即将重置用户 {target_uid} 的所有数据（包括账号、授权次数、验证码缓存等），确定继续？(y/n)")
 
+    # 确认操作（发送验证码和重置）
     @filter.regex(r'^[yYnN]$')
     async def handle_admin_confirm(self, event: AstrMessageEvent):
         if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
@@ -1487,9 +1491,103 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
 
+    # ========== 新增：管理员为指定用户绑定账号 ==========
+    # 步骤1：输入目标QQ
+    @filter.regex(r'^\d+$')
+    async def handle_admin_bind_user(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_bind_user':
+            return
+
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+
+        target_uid = text
+        # 即使目标用户不存在，我们也会通过_load_data自动创建，所以无需检查
+        self._update_state(user_id, step='admin_bind_account', tmp_data={'target_uid': target_uid})
+        self._schedule_timeout(user_id)
+        yield event.plain_result(f"目标用户 {target_uid}，请输入要绑定的手机号#密码（可多个用 & 分隔），输入 0 取消：")
+
+    # 步骤2：输入账号密码
+    @filter.regex(r'^(0|\d{11}#.+)$')
+    async def handle_admin_bind_account(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_bind_account':
+            return
+
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+
+        tmp = state.get('tmp_data', {})
+        target_uid = tmp.get('target_uid')
+        if not target_uid:
+            self._schedule_timeout(user_id)
+            yield event.plain_result("❌ 会话错误，请重新操作。")
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+
+        # 解析账号
+        parts = text.split('&')
+        user_data = await self._load_data(target_uid)  # 自动创建目标用户数据
+        new_accounts = []
+        errors = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                phone, password = part.split('#', 1)
+                phone = phone.strip()
+                password = password.strip()
+                if not phone or not password:
+                    errors.append(f"格式错误: {part}")
+                    continue
+                # 检查是否已存在
+                existing = [a for a in user_data["accounts"] if a["phone"] == phone]
+                if existing:
+                    existing[0]["password"] = password  # 更新密码
+                else:
+                    new_accounts.append({"phone": phone, "password": password})
+            except ValueError:
+                errors.append(f"格式错误: {part}")
+
+        if errors:
+            self._schedule_timeout(user_id)
+            yield event.plain_result("❌ 绑定失败：\n" + "\n".join(errors) + "\n请重新输入")
+            return
+
+        if new_accounts:
+            user_data["accounts"].extend(new_accounts)
+            await self._save_data(target_uid, user_data)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(f"✅ 成功为 {target_uid} 绑定 {len(new_accounts)} 个账号，当前共 {len(user_data['accounts'])} 个账号")
+        else:
+            self._schedule_timeout(user_id)
+            yield event.plain_result("✅ 账号信息已更新（无新增）")
+
+        self._update_state(user_id, menu='admin', step=None)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(self._admin_menu())
+
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.5.4 授权0限制验证码与提现版已加载")
+        logger.info("✅ 酷我插件 2.5.5 管理员绑定账号功能已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
