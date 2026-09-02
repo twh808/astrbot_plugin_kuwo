@@ -514,15 +514,16 @@ class KuwoPlugin(Star):
             "0️⃣ 返回主菜单"
         )
 
+    # ========== 修改点：管理面板数字样式改为带圈数字 ==========
     def _admin_menu(self) -> str:
         return (
-            "🔧 管理面板\n"
-            "[1] 查看所有账号\n"
-            "[2] 删除账号\n"
-            "[3] 修改授权次数（设置具体值或无限制）\n"
-            "[4] 发送验证码（全部账号）\n"
-            "[5] 重置用户所有数据\n"
-            "[0] 退出"
+            "🔧 酷我提现管理面板\n"
+            "1️⃣ 查看所有账号\n"
+            "2️⃣ 删除账号\n"
+            "3️⃣ 修改授权次数（设置具体值或无限制）\n"
+            "4️⃣ 发送验证码（全部账号）\n"
+            "5️⃣ 重置用户所有数据\n"
+            "0️⃣ 退出"
         )
 
     # ---------- 命令入口 ----------
@@ -719,7 +720,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._withdraw_menu())
 
-    # ---------- 普通用户辅助处理器 ----------
+    # ---------- 普通用户辅助 ----------
     @filter.regex(r'^(all|[\d,]+|0|q|Q)$')
     async def handle_send_select(self, event: AstrMessageEvent):
         if getattr(event, '_verify_choice_processed', False):
@@ -1081,7 +1082,7 @@ class KuwoPlugin(Star):
         main_menu = await self._get_main_menu_text(user_id)
         return summary + "\n".join(results) + "\n" + main_menu
 
-    # ---------- 管理员菜单处理器 ----------
+    # ---------- 管理员菜单主处理器 ----------
     @filter.regex(r'^[0-5]$')
     async def handle_admin_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -1103,7 +1104,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出管理面板")
             return
-        elif text == "1":
+        elif text == "1":  # 查看
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1126,7 +1127,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
-        elif text == "2":
+        elif text == "2":  # 删除账号
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1147,7 +1148,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "3":
+        elif text == "3":  # 修改授权
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1168,11 +1169,11 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "4":
+        elif text == "4":  # 发送验证码
             self._update_state(user_id, step='admin_send_code_confirm')
             self._schedule_timeout(user_id)
             yield event.plain_result("⚠️ 即将对**所有用户的所有账号**发送验证码，确定继续？(y/n)")
-        elif text == "5":
+        elif text == "5":  # 重置数据
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1195,7 +1196,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(prompt)
 
     # ---------- 管理员子步骤 ----------
-    # 删除账号 - 选择用户
     @filter.regex(r'^\d+$')
     async def handle_admin_del_select(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1239,13 +1239,13 @@ class KuwoPlugin(Star):
         lines = [f"{idx+1}. {a['phone']}" for idx, a in enumerate(accounts)]
         prompt = f"用户 {target_uid} 的账号列表：\n" + "\n".join(lines) + "\n请输入要删除的序号（多个用逗号分隔），输入 0 取消："
         self._update_state(user_id, step='admin_del_choose', tmp_data={'target_uid': target_uid, 'accounts': accounts})
+        setattr(event, '_admin_sub_processed', True)
         self._schedule_timeout(user_id)
         yield event.plain_result(prompt)
 
-    # 删除账号 - 选择具体账号
     @filter.regex(r'^[\d,]+$')
     async def handle_admin_del_choose(self, event: AstrMessageEvent):
-        if getattr(event, '_admin_choice_processed', False):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
             return
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -1301,7 +1301,6 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    # 修改授权次数 - 选择用户
     @filter.regex(r'^\d+$')
     async def handle_admin_mod_limit_select(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1333,13 +1332,13 @@ class KuwoPlugin(Star):
 
         target_uid = all_users[idx]
         self._update_state(user_id, step='admin_mod_limit_value', tmp_data={'target_uid': target_uid})
+        setattr(event, '_admin_sub_processed', True)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择用户 {target_uid}，请输入新的授权次数（输入 -1 表示无限制）：")
 
-    # 修改授权次数 - 输入值
     @filter.regex(r'^-?\d+$')
     async def handle_admin_mod_limit_value(self, event: AstrMessageEvent):
-        if getattr(event, '_admin_choice_processed', False):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
             return
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -1369,7 +1368,6 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    # 重置数据 - 选择用户
     @filter.regex(r'^\d+$')
     async def handle_admin_reset_select(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1401,13 +1399,13 @@ class KuwoPlugin(Star):
 
         target_uid = all_users[idx]
         self._update_state(user_id, step='admin_reset_confirm', tmp_data={'target_uid': target_uid})
+        setattr(event, '_admin_sub_processed', True)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"⚠️ 即将重置用户 {target_uid} 的所有数据（包括账号、授权次数、验证码缓存等），确定继续？(y/n)")
 
-    # 确认操作
     @filter.regex(r'^[yYnN]$')
     async def handle_admin_confirm(self, event: AstrMessageEvent):
-        if getattr(event, '_admin_choice_processed', False):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
             return
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -1471,7 +1469,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.5.0 完整版（含加密常量）已加载")
+        logger.info("✅ 酷我插件 2.5.2 管理面板样式已统一为带圈数字")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
