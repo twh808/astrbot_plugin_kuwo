@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.2.1 版）
+# 3. AstrBot 插件主类（2.2.2 版，修复生成器调用）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -644,9 +644,9 @@ class KuwoPlugin(Star):
             return
 
         elif text == "1":
-            # 立即获取
-            await self._do_send_code(user_id, event)
-            # 返回主菜单（由 _do_send_code 内部处理返回主菜单）
+            # 立即获取（_do_send_code 是生成器，需要迭代）
+            async for ret in self._do_send_code(user_id, event):
+                yield ret
             return
 
         elif text == "2":
@@ -701,7 +701,7 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
-    # ---------- 发送验证码 ----------
+    # ---------- 发送验证码（生成器，用于列出账号并处理选择） ----------
     async def _do_send_code(self, user_id: str, event: AstrMessageEvent):
         user_data = await self._load_data(user_id)
         if not user_data["accounts"]:
@@ -971,7 +971,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.2.1 版已加载")
+        logger.info("✅ 酷我插件 2.2.2 版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
