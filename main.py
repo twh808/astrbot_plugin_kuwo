@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（优化所有管理面板列表显示）
+# 3. AstrBot 插件主类（发送验证码支持 all）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -559,7 +559,7 @@ class KuwoPlugin(Star):
             "1️⃣ 查看所有账号\n"
             "2️⃣ 删除账号\n"
             "3️⃣ 修改授权次数（设置具体值或无限制）\n"
-            "4️⃣ 发送验证码（可指定用户和账号）\n"
+            "4️⃣ 发送验证码（可指定用户和账号，输入 all 发送全部）\n"
             "5️⃣ 为指定用户绑定账号\n"
             "6️⃣ 重置用户所有数据\n"
             "7️⃣ 查看最近提现记录\n"
@@ -1540,7 +1540,7 @@ class KuwoPlugin(Star):
                 lines.append(f"👤 {uid} -> 暂无提现记录")
         return "📋 最近提现记录：\n" + "\n\n".join(lines)
 
-    # ---------- 管理员菜单主处理器（优化所有列表显示） ----------
+    # ---------- 管理员菜单主处理器 ----------
     @filter.regex(r'^[0-7]$')
     async def handle_admin_choice(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -1585,7 +1585,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
-        elif text == "2":  # 删除账号 - 优化列表
+        elif text == "2":  # 删除账号
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1608,7 +1608,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "3":  # 修改授权 - 已优化
+        elif text == "3":  # 修改授权
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1631,7 +1631,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "4":  # 发送验证码 - 优化列表
+        elif text == "4":  # 发送验证码（支持 all）
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1650,7 +1650,7 @@ class KuwoPlugin(Star):
                     user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   {phones_lines}")
                 else:
                     user_list.append(f"{idx}. QQ {uid}（剩余授权：{auth_display}）\n   (无账号)")
-            prompt = "请选择要发送验证码的用户序号：\n" + "\n".join(user_list) + "\n请输入序号，输入 0 取消："
+            prompt = "请选择要发送验证码的用户序号（输入 all 发送全部）：\n" + "\n".join(user_list) + "\n请输入序号或 all，输入 0 取消："
             self._update_state(user_id, step='admin_send_code_select_user', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
@@ -1658,7 +1658,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_bind_user')
             self._schedule_timeout(user_id)
             yield event.plain_result("请输入要绑定账号的目标用户QQ号：")
-        elif text == "6":  # 重置数据 - 优化列表
+        elif text == "6":  # 重置数据
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1862,7 +1862,8 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    @filter.regex(r'^\d+$')
+    # ========== 修改：发送验证码 - 选择用户（支持 all） ==========
+    @filter.regex(r'^(all|\d+)$')
     async def handle_admin_send_code_select_user(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
             return
@@ -1871,13 +1872,82 @@ class KuwoPlugin(Star):
         if state.get('step') != 'admin_send_code_select_user':
             return
 
-        text = event.message_str.strip()
+        text = event.message_str.strip().lower()
         if text == "0":
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
             return
 
+        # ========== 处理 all：给所有用户的所有账号发送验证码 ==========
+        if text == "all":
+            all_data = await self._load_all_data()
+            if not all_data:
+                self._schedule_timeout(user_id)
+                yield event.plain_result("📭 暂无用户数据。")
+                self._update_state(user_id, menu='admin', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(self._admin_menu())
+                return
+
+            # 收集所有需要发送的账号
+            all_phones = []
+            for uid, udata in all_data.items():
+                accounts = udata.get('accounts', [])
+                auth_limit = udata.get('auth_limit', 0)
+                if auth_limit == 0:
+                    continue
+                target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
+                for acc in target_accounts:
+                    all_phones.append({
+                        "user_id": uid,
+                        "phone": acc['phone'],
+                        "password": acc['password']
+                    })
+
+            if not all_phones:
+                self._schedule_timeout(user_id)
+                yield event.plain_result("❌ 没有可发送验证码的账号（所有用户授权次数均为0或无账号）。")
+                self._update_state(user_id, menu='admin', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(self._admin_menu())
+                return
+
+            # 并发发送
+            results = []
+            total_success = 0
+            total_fail = 0
+
+            async def send_for_all(phone_info):
+                phone = phone_info["phone"]
+                password = phone_info["password"]
+                login = login_kuwo(phone, password)
+                if not login:
+                    return (phone, "登录失败", False)
+                uid_kuwo, sid, appuid, _ = login
+                encrypted_phone = encrypt_phone(phone)
+                success, msg = send_code_once(uid_kuwo, sid, appuid, encrypted_phone, self.quota_id)
+                return (phone, msg, success)
+
+            tasks = [send_for_all(p) for p in all_phones]
+            task_results = await asyncio.gather(*tasks)
+            for phone, msg, success in task_results:
+                if success:
+                    total_success += 1
+                    results.append(f"✅ {phone}: {msg}")
+                else:
+                    total_fail += 1
+                    results.append(f"❌ {phone}: {msg}")
+
+            result_msg = f"📨 全部验证码发送完成\n✅ 成功: {total_success}\n❌ 失败: {total_fail}\n详情：\n" + "\n".join(results)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(result_msg)
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+
+        # ========== 处理数字：选择单个用户 ==========
         try:
             idx = int(text) - 1
         except:
@@ -1902,9 +1972,20 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
 
-        lines = [f"{idx+1}. {a['phone']}" for idx, a in enumerate(accounts)]
+        # 注意：限制账号数量不超过授权次数
+        auth_limit = all_data[target_uid].get('auth_limit', 0)
+        if auth_limit == 0:
+            self._schedule_timeout(user_id)
+            yield event.plain_result(f"❌ 用户 {target_uid} 的授权次数为0，无法发送验证码。")
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        display_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
+
+        lines = [f"{idx+1}. {a['phone']}" for idx, a in enumerate(display_accounts)]
         prompt = f"用户 {target_uid} 的账号列表：\n" + "\n".join(lines) + "\n请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 取消："
-        self._update_state(user_id, step='admin_send_code_select_account', tmp_data={'target_uid': target_uid, 'accounts': accounts})
+        self._update_state(user_id, step='admin_send_code_select_account', tmp_data={'target_uid': target_uid, 'accounts': display_accounts})
         setattr(event, '_admin_sub_processed', True)
         self._schedule_timeout(user_id)
         yield event.plain_result(prompt)
@@ -1954,20 +2035,6 @@ class KuwoPlugin(Star):
                 self._schedule_timeout(user_id)
                 yield event.plain_result("❌ 输入格式错误，请输入数字序号（用逗号分隔）或 all")
                 return
-
-        user_data = await self._load_data(target_uid)
-        auth_limit = user_data.get('auth_limit', 0)
-        if auth_limit == 0:
-            self._schedule_timeout(user_id)
-            yield event.plain_result(f"❌ 用户 {target_uid} 的授权次数为0，无法发送验证码。")
-            self._update_state(user_id, menu='admin', step=None)
-            self._schedule_timeout(user_id)
-            yield event.plain_result(self._admin_menu())
-            return
-        if auth_limit != -1 and len(phones_to_send) > auth_limit:
-            self._schedule_timeout(user_id)
-            yield event.plain_result(f"❌ 选择的账号数量 {len(phones_to_send)} 超出用户 {target_uid} 的授权次数 {auth_limit}，请减少。")
-            return
 
         if not phones_to_send:
             self._schedule_timeout(user_id)
@@ -2159,7 +2226,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.10.3 统一管理面板列表显示版已加载")
+        logger.info("✅ 酷我插件 2.10.4 发送验证码支持 all 版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
