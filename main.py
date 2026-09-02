@@ -33,7 +33,7 @@ static_k = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 static_j = [13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1, 22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1, 40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1, 43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1]
 
 # ======================================================================
-# 2. 加密与 API 函数（完整）
+# 2. 加密与 API 函数（完整，与之前完全相同）
 # ======================================================================
 def func_a1(iArr, i2, j2):
     j3 = 0
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（完整功能 + 秒级定时）
+# 3. AstrBot 插件主类（并发提现 + 默认整点提现）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -374,6 +374,8 @@ class KuwoPlugin(Star):
         self.config = config or {}
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
         self.verification_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
+        # 默认提现定时 cron（每天 9:00、13:00、17:00、20:00）
+        self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 9,13,17,20 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
@@ -408,6 +410,11 @@ class KuwoPlugin(Star):
                 "verification_codes": {},
                 "cron": self.verification_cron,
                 "scheduled_job": {
+                    "cron": None,
+                    "enabled": False,
+                    "last_executed": None
+                },
+                "withdraw_scheduled_job": {
                     "cron": None,
                     "enabled": False,
                     "last_executed": None
@@ -529,7 +536,7 @@ class KuwoPlugin(Star):
         return (
             "💳 提现\n"
             "1️⃣ 立即提现\n"
-            "2️⃣ 定时提现\n"
+            "2️⃣ 整点提现\n"
             "0️⃣ 返回主菜单"
         )
 
@@ -702,7 +709,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._verify_timer_menu())
 
-    # ========== 定时获取子菜单 ==========
+    # ========== 定时获取验证码子菜单 ==========
     @filter.regex(r'^[0-4]$')
     async def handle_verify_timer_choice(self, event: AstrMessageEvent):
         if getattr(event, '_main_choice_processed', False) or getattr(event, '_verify_choice_processed', False):
@@ -829,14 +836,37 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(main_menu)
             return
-        elif text == "1":
+        elif text == "1":  # 立即提现
             result = await self._do_withdraw(user_id, event)
             self._schedule_timeout(user_id)
             yield event.plain_result(result)
             self._update_state(user_id, menu='main', step=None)
-        elif text == "2":
-            self._schedule_timeout(user_id)
-            yield event.plain_result("⏰ 定时提现功能开发中，敬请期待！")
+        elif text == "2":  # 整点提现（切换开关）
+            user_data = await self._load_data(user_id)
+            job = user_data.get('withdraw_scheduled_job', {})
+            if job.get('enabled', False):
+                # 停用
+                user_data['withdraw_scheduled_job']['enabled'] = False
+                await self._save_data(user_id, user_data)
+                self._schedule_timeout(user_id)
+                yield event.plain_result("✅ 已停用整点提现")
+            else:
+                # 启用，使用默认 cron
+                default_cron = self.default_withdraw_cron
+                user_data['withdraw_scheduled_job'] = {
+                    "cron": default_cron,
+                    "enabled": True,
+                    "last_executed": None
+                }
+                await self._save_data(user_id, user_data)
+                self._schedule_timeout(user_id)
+                # 显示提示信息
+                time_desc = "每天 9:00、13:00、17:00、20:00"
+                yield event.plain_result(
+                    f"✅ 已启用整点提现\n"
+                    f"📅 定时规则：{default_cron}\n"
+                    f"🕐 将在 {time_desc} 自动发送提现请求"
+                )
             self._update_state(user_id, menu='withdraw', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._withdraw_menu())
@@ -1147,7 +1177,175 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出")
 
-    # ---------- 核心功能 ----------
+    # ---------- 核心提现逻辑（并发版） ----------
+    async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None) -> str:
+        """
+        执行提现，并发处理多个账号
+        返回结果字符串
+        """
+        user_data = await self._load_data(user_id)
+        if not user_data["accounts"]:
+            return "❌ 请先绑定账号"
+        auth_limit = user_data.get('auth_limit', 0)
+        if auth_limit == 0:
+            return "❌ 授权次数已用完，无法提现"
+        if auth_limit < 0 and auth_limit != -1:
+            return "❌ 授权次数无效"
+
+        # 获取要处理的账号列表
+        all_accounts = user_data["accounts"]
+        if auth_limit != -1:
+            accounts = all_accounts[:auth_limit]
+        else:
+            accounts = all_accounts
+
+        if not accounts:
+            return "❌ 没有可用的账号"
+
+        codes = user_data.get("verification_codes", {})
+        # 预处理：过滤出有有效验证码的账号
+        valid_accounts = []
+        for acc in accounts:
+            phone = acc["phone"]
+            code_info = codes.get(phone)
+            if code_info and time.time() <= code_info.get("expire", 0):
+                valid_accounts.append(acc)
+            else:
+                # 无验证码的账号直接跳过，记录结果
+                pass
+
+        if not valid_accounts:
+            return "❌ 所有账号均未配置有效验证码，请先获取验证码"
+
+        # 并发执行每个账号的提现
+        async def withdraw_single(acc):
+            phone = acc["phone"]
+            password = acc["password"]
+            code_info = codes.get(phone)
+            if not code_info:
+                return (phone, None, "跳过（无验证码）", False)
+
+            # 登录
+            login_result = login_kuwo(phone, password)
+            if not login_result:
+                return (phone, None, "登录失败", False)
+            uid, sid, appuid, _ = login_result
+
+            # 检查今日是否已提现
+            if check_withdraw_today(uid, sid):
+                return (phone, None, "今日已提现，跳过", False)
+
+            encrypted_phone = encrypt_phone(phone)
+            code = code_info["code"]
+            # 使用 to_thread 运行同步函数，不阻塞事件循环
+            log_lines, final_msg, is_success = await asyncio.to_thread(
+                withdraw_confirm_once,
+                phone, uid, sid, appuid, encrypted_phone, code,
+                self.kwtxid, self.verification_id, self.q36,
+                seq=1, max_extra_retries=self.max_retries, retry_delay_ms=self.retry_delay_ms
+            )
+            return (phone, final_msg, final_msg, is_success)
+
+        # 并发执行
+        tasks = [withdraw_single(acc) for acc in valid_accounts]
+        results = await asyncio.gather(*tasks)
+
+        # 统计结果，更新数据
+        success_count = 0
+        result_lines = []
+        for phone, final_msg, desc, is_success in results:
+            if is_success:
+                success_count += 1
+                result_lines.append(f"✅ 提现成功 {phone}: {desc}")
+            else:
+                result_lines.append(f"❌ 提现失败 {phone}: {desc}")
+
+        # 如果有跳过的情况（无验证码、今日已提现等），需单独记录
+        # 但上面的 gather 只处理了 valid_accounts，无验证码的账号未被包含
+        # 需要单独处理无验证码的账号
+        skipped_phones = [acc["phone"] for acc in accounts if acc["phone"] not in [r[0] for r in results]]
+        for phone in skipped_phones:
+            result_lines.append(f"⏭️ {phone}: 无有效验证码，已跳过")
+
+        # 更新授权次数
+        if success_count > 0 and auth_limit != -1:
+            user_data["auth_limit"] -= success_count
+            if user_data["auth_limit"] < 0:
+                user_data["auth_limit"] = 0
+
+        # 清除已使用的验证码
+        for phone in [r[0] for r in results if r[3]]:
+            if phone in user_data["verification_codes"]:
+                del user_data["verification_codes"][phone]
+
+        # 记录 daily_withdraw
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today not in user_data["daily_withdraw"]:
+            user_data["daily_withdraw"][today] = {}
+        for phone, _, _, is_success in results:
+            if is_success:
+                user_data["daily_withdraw"][today][phone] = True
+
+        await self._save_data(user_id, user_data)
+
+        # 构建总结
+        total = len(accounts)
+        summary = (
+            f"📊 【提现完成】\n"
+            f"✅ 成功: {success_count}\n"
+            f"❌ 失败: {len(results) - success_count}\n"
+            f"⏭️ 跳过: {total - len(valid_accounts) + (len(valid_accounts) - len(results))}\n"
+            f"📈 剩余可用次数: {'无限制' if user_data['auth_limit'] == -1 else user_data['auth_limit']}\n"
+            f"━━━━━━━━━━━━\n"
+        )
+        return summary + "\n".join(result_lines)
+
+    # ---------- 立即提现（调用公共逻辑） ----------
+    async def _do_withdraw(self, user_id: str, event: AstrMessageEvent) -> str:
+        """立即提现，并附带主菜单"""
+        result = await self._process_withdraw(user_id, event)
+        main_menu = await self._get_main_menu_text(user_id)
+        return result + "\n" + main_menu
+
+    # ---------- 定时提现任务 ----------
+    async def _execute_withdraw_scheduled_job(self, user_id: str):
+        """定时提现任务，发送结果通知"""
+        try:
+            user_data = await self._load_data(user_id)
+            job = user_data.get('withdraw_scheduled_job', {})
+            if not job.get('cron') or not job.get('enabled'):
+                logger.info(f"用户 {user_id} 提现定时任务未启用或无规则")
+                return
+
+            # 防重
+            last_exec = job.get('last_executed')
+            if last_exec:
+                try:
+                    last_dt = datetime.strptime(last_exec, '%Y-%m-%d %H:%M:%S')
+                    if (datetime.now() - last_dt).total_seconds() < 1:
+                        return
+                except:
+                    pass
+
+            result = await self._process_withdraw(user_id, None)
+            # 更新执行时间
+            user_data['withdraw_scheduled_job']['last_executed'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            await self._save_data(user_id, user_data)
+
+            # 发送通知
+            state = self._get_state(user_id)
+            umo = state.get('umo')
+            if umo:
+                try:
+                    await self.context.send_message(umo, MessageChain().message(f"⏰ 整点提现完成\n{result}"))
+                except Exception as e:
+                    logger.error(f"发送提现定时结果失败: {e}")
+            else:
+                logger.info(f"提现定时任务结果（用户 {user_id}）：\n{result}")
+        except Exception as e:
+            logger.error(f"提现定时任务执行失败: {e}")
+
+    # ---------- 获取验证码核心 ----------
     async def _do_send_code(self, user_id: str) -> str:
         logger.info(f"🟢 _do_send_code 被调用，用户 {user_id}")
         user_data = await self._load_data(user_id)
@@ -1177,76 +1375,109 @@ class KuwoPlugin(Star):
         logger.info(f"返回提示: {prompt[:50]}...")
         return prompt
 
-    async def _do_withdraw(self, user_id: str, event: AstrMessageEvent) -> str:
-        user_data = await self._load_data(user_id)
-        if not user_data["accounts"]:
-            main_menu = await self._get_main_menu_text(user_id)
-            return "❌ 请先绑定账号\n" + main_menu
-        auth_limit = user_data.get('auth_limit', 0)
-        if auth_limit == 0:
-            main_menu = await self._get_main_menu_text(user_id)
-            return "❌ 授权次数已用完，无法提现\n" + main_menu
-        if auth_limit < 0 and auth_limit != -1:
-            main_menu = await self._get_main_menu_text(user_id)
-            return "❌ 授权次数无效\n" + main_menu
+    # ---------- 定时获取验证码执行 ----------
+    async def _execute_scheduled_job(self, user_id: str, is_manual: bool = False):
+        try:
+            user_data = await self._load_data(user_id)
+            job = user_data.get('scheduled_job', {})
+            if not job.get('cron') or not job.get('enabled'):
+                logger.info(f"用户 {user_id} 定时任务未启用或无规则")
+                return
 
-        accounts = user_data["accounts"][:auth_limit] if auth_limit != -1 else user_data["accounts"]
-        results = []
-        success_count = 0
-        codes = user_data.get("verification_codes", {})
+            accounts = user_data.get('accounts', [])
+            if not accounts:
+                logger.info(f"用户 {user_id} 无绑定账号，跳过定时任务")
+                return
 
-        for acc in accounts:
-            phone = acc["phone"]
-            code_info = codes.get(phone)
-            if not code_info or time.time() > code_info.get("expire", 0):
-                results.append(f"❌ {phone}: 验证码未获取或已过期")
-                continue
+            auth_limit = user_data.get('auth_limit', 0)
+            if auth_limit == 0:
+                logger.warning(f"用户 {user_id} 授权次数为0，定时任务跳过")
+                return
 
-            login = login_kuwo(phone, acc["password"])
-            if not login:
-                results.append(f"❌ {phone}: 登录失败")
-                continue
-            uid, sid, appuid, _ = login
+            state = self._get_state(user_id)
+            umo = state.get('umo')
+            if not umo:
+                logger.warning(f"用户 {user_id} 没有可用会话，无法发送定时通知，但任务仍会执行")
 
-            if check_withdraw_today(uid, sid):
-                results.append(f"⏭️ {phone}: 今日已提现，跳过")
-                continue
+            target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
+            results = []
+            for acc in target_accounts:
+                phone = acc['phone']
+                password = acc['password']
+                login = login_kuwo(phone, password)
+                if not login:
+                    results.append(f"❌ {phone}: 登录失败")
+                    continue
+                uid, sid, appuid, _ = login
+                encrypted_phone = encrypt_phone(phone)
+                success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
+                results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
+                await asyncio.sleep(0.5)
 
-            encrypted_phone = encrypt_phone(phone)
-            code = code_info["code"]
-            log_lines, final_msg, is_success = withdraw_confirm_once(
-                phone, uid, sid, appuid, encrypted_phone, code,
-                self.kwtxid, self.verification_id, self.q36,
-                seq=1, max_extra_retries=self.max_retries, retry_delay_ms=self.retry_delay_ms
-            )
+            user_data['scheduled_job']['last_executed'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            await self._save_data(user_id, user_data)
 
-            if phone in user_data["verification_codes"]:
-                del user_data["verification_codes"][phone]
-
-            if is_success:
-                success_count += 1
-                if auth_limit != -1:
-                    user_data["auth_limit"] -= 1
-                today = datetime.now().strftime("%Y-%m-%d")
-                if today not in user_data["daily_withdraw"]:
-                    user_data["daily_withdraw"][today] = {}
-                user_data["daily_withdraw"][today][phone] = True
-                results.append(f"✅ 提现成功 {phone}: {final_msg}")
+            result_msg = f"⏰ 定时获取验证码完成\n" + "\n".join(results)
+            if is_manual:
+                result_msg = "🔹 手动执行结果：\n" + result_msg
+            if umo:
+                try:
+                    await self.context.send_message(umo, MessageChain().message(result_msg))
+                except Exception as e:
+                    logger.error(f"发送定时结果失败: {e}")
             else:
-                results.append(f"❌ 提现失败 {phone}: {final_msg}")
+                logger.info(f"定时任务执行结果（用户 {user_id}）：\n{result_msg}")
 
-        await self._save_data(user_id, user_data)
+        except Exception as e:
+            logger.error(f"执行定时任务失败: {e}")
 
-        summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {'无限制' if user_data['auth_limit'] == -1 else user_data['auth_limit']}\n━━━━━━━━━━━━\n"
-        main_menu = await self._get_main_menu_text(user_id)
-        return summary + "\n".join(results) + "\n" + main_menu
+    # ---------- 调度器循环（每秒检查） ----------
+    async def _scheduler_loop(self):
+        logger.info("🕐 定时调度器开始运行，每秒检查一次")
+        while self.scheduler_running:
+            try:
+                now = datetime.now()
+                all_data = await self._load_all_data()
+                for user_id, user_data in all_data.items():
+                    # 检查验证码定时任务
+                    job = user_data.get('scheduled_job', {})
+                    if job.get('cron') and job.get('enabled'):
+                        last_exec = job.get('last_executed')
+                        if last_exec:
+                            try:
+                                last_dt = datetime.strptime(last_exec, '%Y-%m-%d %H:%M:%S')
+                                if (now - last_dt).total_seconds() < 1:
+                                    continue
+                            except:
+                                pass
+                        cron_dict = self._parse_cron(job['cron'])
+                        if self._match_cron(cron_dict, now):
+                            logger.info(f"⏰ 验证码定时任务触发: 用户 {user_id}, cron: {job['cron']}")
+                            asyncio.create_task(self._execute_scheduled_job(user_id))
 
-    # ========== 定时任务核心功能（秒级精度） ==========
+                    # 检查提现定时任务
+                    wjob = user_data.get('withdraw_scheduled_job', {})
+                    if wjob.get('cron') and wjob.get('enabled'):
+                        last_exec = wjob.get('last_executed')
+                        if last_exec:
+                            try:
+                                last_dt = datetime.strptime(last_exec, '%Y-%m-%d %H:%M:%S')
+                                if (now - last_dt).total_seconds() < 1:
+                                    continue
+                            except:
+                                pass
+                        cron_dict = self._parse_cron(wjob['cron'])
+                        if self._match_cron(cron_dict, now):
+                            logger.info(f"⏰ 提现定时任务触发: 用户 {user_id}, cron: {wjob['cron']}")
+                            asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
+            except Exception as e:
+                logger.error(f"调度循环错误: {e}")
+            await asyncio.sleep(1)
+
     def _parse_cron(self, cron_expr: str) -> dict:
-        """解析cron表达式，支持秒级，返回字段值列表"""
         parts = cron_expr.split()
         if len(parts) == 5:
-            parts = ['*'] + parts  # 补秒
+            parts = ['*'] + parts
         fields = ['second', 'minute', 'hour', 'day', 'month', 'weekday']
         result = {}
         for i, part in enumerate(parts):
@@ -1279,7 +1510,6 @@ class KuwoPlugin(Star):
         return result
 
     def _match_cron(self, cron_dict: dict, dt: datetime) -> bool:
-        """检查当前时间是否匹配 cron 字典（精确到秒）"""
         for field, values in cron_dict.items():
             if values is None:
                 continue
@@ -1294,99 +1524,10 @@ class KuwoPlugin(Star):
             elif field == 'month':
                 current = dt.month
             elif field == 'weekday':
-                current = dt.weekday() + 1  # 1=周一, 7=周日
+                current = dt.weekday() + 1
             if current not in values:
                 return False
         return True
-
-    async def _execute_scheduled_job(self, user_id: str, is_manual: bool = False):
-        try:
-            user_data = await self._load_data(user_id)
-            job = user_data.get('scheduled_job', {})
-            if not job.get('cron') or not job.get('enabled'):
-                logger.info(f"用户 {user_id} 定时任务未启用或无规则")
-                return
-
-            accounts = user_data.get('accounts', [])
-            if not accounts:
-                logger.info(f"用户 {user_id} 无绑定账号，跳过定时任务")
-                return
-
-            auth_limit = user_data.get('auth_limit', 0)
-            if auth_limit == 0:
-                logger.warning(f"用户 {user_id} 授权次数为0，定时任务跳过")
-                return
-
-            # 获取用户的会话对象
-            state = self._get_state(user_id)
-            umo = state.get('umo')
-            if not umo:
-                # 尝试从所有已知会话中查找（简化处理，仅记录日志）
-                logger.warning(f"用户 {user_id} 没有可用会话，无法发送定时通知，但任务仍会执行")
-                # 即使没有会话，也继续执行任务，仅记录结果
-
-            target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
-            results = []
-            for acc in target_accounts:
-                phone = acc['phone']
-                password = acc['password']
-                login = login_kuwo(phone, password)
-                if not login:
-                    results.append(f"❌ {phone}: 登录失败")
-                    continue
-                uid, sid, appuid, _ = login
-                encrypted_phone = encrypt_phone(phone)
-                success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
-                results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
-                await asyncio.sleep(0.5)
-
-            # 更新上次执行时间
-            user_data['scheduled_job']['last_executed'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            await self._save_data(user_id, user_data)
-
-            # 尝试发送结果通知
-            result_msg = f"⏰ 定时获取验证码完成\n" + "\n".join(results)
-            if is_manual:
-                result_msg = "🔹 手动执行结果：\n" + result_msg
-            if umo:
-                try:
-                    await self.context.send_message(umo, MessageChain().message(result_msg))
-                except Exception as e:
-                    logger.error(f"发送定时结果失败: {e}")
-            else:
-                logger.info(f"定时任务执行结果（用户 {user_id}）：\n{result_msg}")
-
-        except Exception as e:
-            logger.error(f"执行定时任务失败: {e}")
-
-    async def _scheduler_loop(self):
-        """后台调度循环，每秒检查一次，精确到秒级"""
-        logger.info("🕐 定时调度器开始运行，每秒检查一次")
-        while self.scheduler_running:
-            try:
-                now = datetime.now()
-                all_data = await self._load_all_data()
-                for user_id, user_data in all_data.items():
-                    job = user_data.get('scheduled_job', {})
-                    if not job.get('cron') or not job.get('enabled'):
-                        continue
-                    last_exec = job.get('last_executed')
-                    if last_exec:
-                        try:
-                            last_dt = datetime.strptime(last_exec, '%Y-%m-%d %H:%M:%S')
-                            # 同一秒内不重复触发
-                            if (now - last_dt).total_seconds() < 1:
-                                continue
-                        except:
-                            pass
-                    cron_dict = self._parse_cron(job['cron'])
-                    if self._match_cron(cron_dict, now):
-                        logger.info(f"⏰ 定时任务触发: 用户 {user_id}, cron: {job['cron']}")
-                        asyncio.create_task(self._execute_scheduled_job(user_id))
-            except Exception as e:
-                logger.error(f"调度循环错误: {e}")
-            # 每秒检查一次
-            await asyncio.sleep(1)
 
     # ---------- 管理员菜单主处理器 ----------
     @filter.regex(r'^[0-6]$')
@@ -1992,7 +2133,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.6.2 秒级定时修复版已加载")
+        logger.info("✅ 酷我插件 2.8.0 并发提现版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
