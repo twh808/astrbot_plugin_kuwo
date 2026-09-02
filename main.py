@@ -171,7 +171,7 @@ def encrypt_phone(phone):
     return ciphertext_base64
 
 # ======================================================================
-# 2. 酷我 API 函数（完整）
+# 2. 酷我 API 函数
 # ======================================================================
 def login_kuwo(username, password):
     try:
@@ -367,7 +367,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（2.2.0 版，修复删除账号重复触发）
+# 3. AstrBot 插件主类（2.2.1 版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -529,7 +529,6 @@ class KuwoPlugin(Star):
             lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
             prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1），输入 0 取消："
             yield event.plain_result(prompt)
-            # 记录触发消息，用于防止同一消息触发子处理器
             self._update_state(user_id, step='waiting_delete', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
 
         elif text == "3":
@@ -645,7 +644,10 @@ class KuwoPlugin(Star):
             return
 
         elif text == "1":
+            # 立即获取
             await self._do_send_code(user_id, event)
+            # 返回主菜单（由 _do_send_code 内部处理返回主菜单）
+            return
 
         elif text == "2":
             user_data = await self._load_data(user_id)
@@ -694,7 +696,8 @@ class KuwoPlugin(Star):
         user_data["cron"] = text
         await self._save_data(user_id, user_data)
 
-        yield event.plain_result(f"✅ 定时规则已更新：{text}")
+        # 提示定时功能不可用
+        yield event.plain_result(f"✅ 定时规则已更新：{text}\n⚠️ 注意：当前环境不支持调度器，定时自动获取功能不可用，请使用立即获取。")
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(self._main_menu())
 
@@ -706,9 +709,11 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='main')
             yield event.plain_result(self._main_menu())
             return
+
+        # 列出账号供选择
         lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
         prompt = "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
-        self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': '1'})  # 触发消息为'1'，但实际不用于防重
+        self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': user_data["accounts"]})
         yield event.plain_result(prompt)
 
     # ---------- 处理发送验证码的选择 ----------
@@ -720,7 +725,6 @@ class KuwoPlugin(Star):
             return
 
         text = event.message_str.strip().lower()
-        # 检查是否为取消（0）
         if text == "0":
             self._update_state(user_id, menu='verify', step=None)
             yield event.plain_result(self._verify_menu())
@@ -756,6 +760,7 @@ class KuwoPlugin(Star):
 
         results = []
         for phone in phones_to_send:
+            # 查找密码
             password = None
             for acc in accounts:
                 if acc["phone"] == phone:
@@ -966,7 +971,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.2.0 版已加载")
+        logger.info("✅ 酷我插件 2.2.1 版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
