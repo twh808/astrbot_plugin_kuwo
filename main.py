@@ -479,8 +479,9 @@ class KuwoPlugin(Star):
     async def _get_main_menu_text(self, user_id: str) -> str:
         user_data = await self._load_data(user_id)
         auth_limit = user_data.get('auth_limit', 0)
+        auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
         return (
-            f"🎵 酷我音乐管理菜单 (剩余授权: {auth_limit}次)\n"
+            f"🎵 酷我菜单 (剩余授权: {auth_display})\n"
             "1️⃣ 账号管理\n"
             "2️⃣ 获取验证码\n"
             "3️⃣ 提交验证码\n"
@@ -514,7 +515,6 @@ class KuwoPlugin(Star):
             "0️⃣ 返回主菜单"
         )
 
-    # ========== 修改点：管理面板数字样式改为带圈数字 ==========
     def _admin_menu(self) -> str:
         return (
             "🔧 酷我提现管理面板\n"
@@ -638,7 +638,9 @@ class KuwoPlugin(Star):
             user_data = await self._load_data(user_id)
             if user_data["accounts"]:
                 lines = [f"📱 {a['phone']}" for a in user_data["accounts"]]
-                lines.append(f"📊 剩余授权次数：{user_data['auth_limit']}")
+                auth_limit = user_data.get('auth_limit', 0)
+                auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
+                lines.append(f"📊 剩余授权次数：{auth_display}")
                 self._schedule_timeout(user_id)
                 yield event.plain_result("📋 您绑定的账号：\n" + "\n".join(lines))
             else:
@@ -1015,6 +1017,15 @@ class KuwoPlugin(Star):
     async def _do_send_code(self, user_id: str) -> str:
         logger.info(f"🟢 _do_send_code 被调用，用户 {user_id}")
         user_data = await self._load_data(user_id)
+        auth_limit = user_data.get('auth_limit', 0)
+        
+        # ====== 授权次数为 0 时禁止获取验证码 ======
+        if auth_limit == 0:
+            logger.warning(f"用户 {user_id} 授权次数为0，无法获取验证码")
+            self._update_state(user_id, menu='main', step=None)
+            main_menu = await self._get_main_menu_text(user_id)
+            return "❌ 授权次数已用完，无法获取验证码\n" + main_menu
+
         accounts = user_data.get("accounts", [])
         logger.info(f"用户 {user_id} 当前账号数量: {len(accounts)}")
         if not accounts:
@@ -1039,10 +1050,18 @@ class KuwoPlugin(Star):
         if not user_data["accounts"]:
             main_menu = await self._get_main_menu_text(user_id)
             return "❌ 请先绑定账号\n" + main_menu
-        if user_data["auth_limit"] <= 0:
+        # 检查授权次数：0 或负数（但 -1 为无限制）
+        auth_limit = user_data.get('auth_limit', 0)
+        if auth_limit == 0:
             main_menu = await self._get_main_menu_text(user_id)
-            return "❌ 授权次数已用完\n" + main_menu
-        accounts = user_data["accounts"][:user_data["auth_limit"]]
+            return "❌ 授权次数已用完，无法提现\n" + main_menu
+        if auth_limit < 0 and auth_limit != -1:
+            # 如果出现其他负数（理论上不会），视为0
+            main_menu = await self._get_main_menu_text(user_id)
+            return "❌ 授权次数无效\n" + main_menu
+
+        # 确定可用账号列表：如果 auth_limit == -1 则全部，否则取前 auth_limit 个
+        accounts = user_data["accounts"][:auth_limit] if auth_limit != -1 else user_data["accounts"]
         results = []
         success_count = 0
         codes = user_data.get("verification_codes", {})
@@ -1069,7 +1088,8 @@ class KuwoPlugin(Star):
             )
             if is_success:
                 success_count += 1
-                user_data["auth_limit"] -= 1
+                if auth_limit != -1:
+                    user_data["auth_limit"] -= 1
                 today = datetime.now().strftime("%Y-%m-%d")
                 if today not in user_data["daily_withdraw"]:
                     user_data["daily_withdraw"][today] = {}
@@ -1078,7 +1098,7 @@ class KuwoPlugin(Star):
                 results.append(f"✅ 提现成功 {phone}: {final_msg}")
             else:
                 results.append(f"❌ 提现失败 {phone}: {final_msg}")
-        summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {user_data['auth_limit']}\n━━━━━━━━━━━━\n"
+        summary = f"📊 【提现完成】\n✅ 成功: {success_count} | ❌ 失败: {len(results)-success_count}\n📈 剩余可用次数: {'无限制' if user_data['auth_limit'] == -1 else user_data['auth_limit']}\n━━━━━━━━━━━━\n"
         main_menu = await self._get_main_menu_text(user_id)
         return summary + "\n".join(results) + "\n" + main_menu
 
@@ -1469,7 +1489,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.5.2 管理面板样式已统一为带圈数字")
+        logger.info("✅ 酷我插件 2.5.4 授权0限制验证码与提现版已加载")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
