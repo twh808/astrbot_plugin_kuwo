@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（优化查看提现记录排版）
+# 3. AstrBot 插件主类（移除刷新提示，直接展示最新记录）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -1527,20 +1527,19 @@ class KuwoPlugin(Star):
                 return False
         return True
 
-    # ---------- 管理员查看最近提现记录（优化排版） ----------
+    # ---------- 管理员查看最近提现记录 ----------
     async def _view_last_withdraw_logs(self) -> str:
+        """直接返回最新的提现记录（无需刷新）"""
         all_data = await self._load_all_data()
         if not all_data:
             return "📭 暂无用户数据。"
         lines = []
         for uid, udata in all_data.items():
             log = udata.get('last_withdraw_log')
-            # 用户标识
             user_line = f"👤 QQ {uid}"
             if log:
                 time_str = log.get('time', '未知时间')
                 result = log.get('result', '')
-                # 提取摘要：显示成功/失败数量
                 success_match = re.search(r'✅ 成功: (\d+)', result)
                 fail_match = re.search(r'❌ 失败: (\d+)', result)
                 skip_match = re.search(r'⏭️ 跳过: (\d+)', result)
@@ -1711,7 +1710,7 @@ class KuwoPlugin(Star):
             self._update_state(user_id, step='admin_reset_select', tmp_data={'all_users': list(all_data.keys())})
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-        elif text == "7":  # 查看最近提现记录
+        elif text == "7":  # 查看最近提现记录（直接展示最新，无需刷新）
             result = await self._view_last_withdraw_logs()
             self._schedule_timeout(user_id)
             yield event.plain_result(result)
@@ -2256,7 +2255,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.10.6 优化提现记录排版版已加载")
+        logger.info("✅ 酷我插件 2.10.8 实时记录无刷新版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查）")
