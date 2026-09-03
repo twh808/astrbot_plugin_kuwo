@@ -378,7 +378,7 @@ class KuwoPlugin(Star):
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
-        self.timeout = self.config.get('timeout', 300)          # 300秒超时
+        self.timeout = self.config.get('timeout', 300)          # 默认300秒
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
         self.quota_id = self.config.get('quota_id', "60004")
@@ -500,9 +500,21 @@ class KuwoPlugin(Star):
         self.timeout_tasks[user_id] = task
 
     async def _timeout_after_delay(self, user_id: str):
+        """改进的超时检测：动态等待，以最后活动时间为准"""
         try:
-            await asyncio.sleep(self.TIMEOUT)
-            await self._timeout_callback(user_id)
+            while True:
+                state = self._get_state(user_id)
+                if not state or (not state.get('menu') and not state.get('step')):
+                    # 已退出交互，结束任务
+                    break
+                elapsed = time.time() - state.get('last_active', time.time())
+                remaining = self.TIMEOUT - elapsed
+                if remaining <= 0:
+                    # 超时
+                    await self._timeout_callback(user_id)
+                    break
+                # 等待剩余时间，但最多等待1秒以便及时响应状态变化
+                await asyncio.sleep(min(remaining, 1))
         except asyncio.CancelledError:
             pass
 
@@ -1193,11 +1205,13 @@ class KuwoPlugin(Star):
     async def reset_timeout_on_any(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
-        # 仅当用户处于交互状态时重置超时
         if state and (state.get('menu') or state.get('step')):
+            # 更新最后活动时间
+            state['last_active'] = time.time()
+            # 取消旧任务并重新调度（新的超时任务会使用最新的 last_active）
             self._cancel_timeout(user_id)
             self._schedule_timeout(user_id)
-        # 不返回任何消息，让事件继续传递给其他处理器
+        # 不返回任何消息，继续传递事件
 
     # ---------- 核心提现逻辑（并发版，记录日志） ----------
     async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None) -> str:
@@ -2263,7 +2277,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 v2.12.2 已加载（增加任意消息重置超时）")
+        logger.info("✅ 酷我插件 v2.12.3 已加载（增强超时机制，任意消息重置）")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查，1秒防重）")
