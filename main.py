@@ -1188,6 +1188,17 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出")
 
+    # ---------- 新增：捕获所有消息重置超时（避免因未匹配指令提前超时） ----------
+    @filter.regex(r'^.*$')
+    async def reset_timeout_on_any(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        # 仅当用户处于交互状态时重置超时
+        if state and (state.get('menu') or state.get('step')):
+            self._cancel_timeout(user_id)
+            self._schedule_timeout(user_id)
+        # 不返回任何消息，让事件继续传递给其他处理器
+
     # ---------- 核心提现逻辑（并发版，记录日志） ----------
     async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None) -> str:
         """
@@ -2252,7 +2263,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 v2.12.1 已加载（防重改为1秒，今日提现检查，每秒调度）")
+        logger.info("✅ 酷我插件 v2.12.2 已加载（增加任意消息重置超时）")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 定时调度器已启动（每秒检查，1秒防重）")
