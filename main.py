@@ -33,7 +33,7 @@ static_k = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 static_j = [13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1, 22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1, 40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1, 43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1]
 
 # ======================================================================
-# 2. 加密与 API 函数（完整，与之前完全相同）
+# 2. 加密与 API 函数（完整）
 # ======================================================================
 def func_a1(iArr, i2, j2):
     j3 = 0
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（已修复定时重复触发 + 今日提现检查）
+# 3. AstrBot 插件主类
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -378,7 +378,7 @@ class KuwoPlugin(Star):
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
         self.kwtxid = self.config.get('kwtxid', "30002")
-        self.timeout = self.config.get('timeout', 300)
+        self.timeout = self.config.get('timeout', 300)          # 300秒超时
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
         self.quota_id = self.config.get('quota_id', "60004")
@@ -951,11 +951,10 @@ class KuwoPlugin(Star):
                 results.append(f"❌ {phone}: 登录失败")
                 continue
             uid, sid, appuid, _ = login
-            # ====== 新增：检查今日是否已提现 ======
+            # 检查今日是否已提现
             if check_withdraw_today(uid, sid):
                 results.append(f"⏭️ {phone}: 今日已提现，跳过发送")
                 continue
-            # ====================================
             encrypted_phone = encrypt_phone(phone)
             success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
             results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
@@ -1398,11 +1397,10 @@ class KuwoPlugin(Star):
                     results.append(f"❌ {phone}: 登录失败")
                     continue
                 uid, sid, appuid, _ = login
-                # ====== 新增：检查今日是否已提现 ======
+                # 检查今日是否已提现
                 if check_withdraw_today(uid, sid):
                     results.append(f"⏭️ {phone}: 今日已提现，跳过发送")
                     continue
-                # ====================================
                 encrypted_phone = encrypt_phone(phone)
                 success, msg = send_code_once(uid, sid, appuid, encrypted_phone, self.quota_id)
                 results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
@@ -1422,9 +1420,9 @@ class KuwoPlugin(Star):
         except Exception as e:
             logger.error(f"执行定时任务失败: {e}")
 
-    # ---------- 调度器循环（每30秒检查，防重阈值60秒） ----------
+    # ---------- 调度器循环（每秒检查，1秒防重复） ----------
     async def _scheduler_loop(self):
-        logger.info("🕐 定时调度器开始运行，每30秒检查一次")
+        logger.info("🕐 定时调度器开始运行，每秒检查一次（防重复间隔1秒）")
         while self.scheduler_running:
             try:
                 now = datetime.now()
@@ -1434,10 +1432,11 @@ class KuwoPlugin(Star):
                     job = user_data.get('scheduled_job', {})
                     if job.get('cron') and job.get('enabled'):
                         last_exec = job.get('last_executed')
+                        # 防重复：如果上次执行时间与当前时间相差不足1秒则跳过
                         if last_exec:
                             try:
                                 last_dt = datetime.strptime(last_exec, '%Y-%m-%d %H:%M:%S')
-                                if (now - last_dt).total_seconds() < 60:
+                                if (now - last_dt).total_seconds() < 1:
                                     continue
                             except:
                                 pass
@@ -1453,7 +1452,7 @@ class KuwoPlugin(Star):
                         if last_exec:
                             try:
                                 last_dt = datetime.strptime(last_exec, '%Y-%m-%d %H:%M:%S')
-                                if (now - last_dt).total_seconds() < 60:
+                                if (now - last_dt).total_seconds() < 1:
                                     continue
                             except:
                                 pass
@@ -1463,7 +1462,7 @@ class KuwoPlugin(Star):
                             asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
             except Exception as e:
                 logger.error(f"调度循环错误: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(1)   # 每秒检查
 
     def _parse_cron(self, cron_expr: str) -> dict:
         parts = cron_expr.split()
@@ -1943,10 +1942,8 @@ class KuwoPlugin(Star):
                 if not login:
                     return (phone, "登录失败", False)
                 uid_kuwo, sid, appuid, _ = login
-                # ====== 新增：检查今日是否已提现 ======
                 if check_withdraw_today(uid_kuwo, sid):
                     return (phone, "今日已提现，跳过", False)
-                # ====================================
                 encrypted_phone = encrypt_phone(phone)
                 success, msg = send_code_once(uid_kuwo, sid, appuid, encrypted_phone, self.quota_id)
                 return (phone, msg, success)
@@ -2085,11 +2082,9 @@ class KuwoPlugin(Star):
                 results.append(f"❌ {phone}: 登录失败")
                 continue
             uid_kuwo, sid, appuid, _ = login
-            # ====== 新增：检查今日是否已提现 ======
             if check_withdraw_today(uid_kuwo, sid):
                 results.append(f"⏭️ {phone}: 今日已提现，跳过发送")
                 continue
-            # ====================================
             encrypted_phone = encrypt_phone(phone)
             success, msg = send_code_once(uid_kuwo, sid, appuid, encrypted_phone, self.quota_id)
             results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
@@ -2257,10 +2252,10 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.11.0 修复定时重复触发版 + 今日提现检查已加载")
+        logger.info("✅ 酷我插件 v2.12.1 已加载（防重改为1秒，今日提现检查，每秒调度）")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
-        logger.info("✅ 定时调度器已启动（每30秒检查）")
+        logger.info("✅ 定时调度器已启动（每秒检查，1秒防重）")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
