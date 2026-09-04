@@ -19,7 +19,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 # ======================================================================
-# 1. 加密常量（完整，未作任何变动）
+# 1. 加密常量（完整）
 # ======================================================================
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
@@ -33,7 +33,7 @@ static_k = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 static_j = [13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1, 22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1, 40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1, 43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1]
 
 # ======================================================================
-# 2. 加密与 API 函数（完整，未变）
+# 2. 加密与 API 函数（完整）
 # ======================================================================
 def func_a1(iArr, i2, j2):
     j3 = 0
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（含高精度毫秒级调度器）
+# 3. AstrBot 插件主类（高精度毫秒级调度版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -1301,6 +1301,7 @@ class KuwoPlugin(Star):
 
     async def _execute_withdraw_scheduled_job(self, user_id: str):
         try:
+            logger.info(f"💳 开始执行提现定时任务，用户 {user_id}")
             user_data = await self._load_data(user_id)
             job = user_data.get('withdraw_scheduled_job', {})
             if not job.get('cron') or not job.get('enabled'):
@@ -1450,32 +1451,53 @@ class KuwoPlugin(Star):
                             events.append((nt, user_id, 'withdraw'))
 
                 if not events:
+                    # 无任务，休眠60秒后继续扫描
                     await asyncio.sleep(60)
                     continue
 
+                # 按时间排序
                 events.sort(key=lambda x: x[0])
-                next_time = events[0][0]
-                delay_seconds = (next_time - now).total_seconds()
 
+                # 1. 立即处理所有已经到期的任务（nt <= now）
+                expired = [e for e in events if e[0] <= now]
+                for nt, user_id, job_type in expired:
+                    logger.info(f"⏰ 触发已到期任务: 用户 {user_id}, 类型 {job_type}, 原定时间 {nt.strftime('%H:%M:%S.%f')}")
+                    if job_type == 'code':
+                        asyncio.create_task(self._execute_scheduled_job(user_id))
+                    elif job_type == 'withdraw':
+                        asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
+
+                # 2. 查找下一个未到期的任务
+                future_events = [e for e in events if e[0] > now]
+                if not future_events:
+                    # 所有事件都已过期，等待1秒后重新扫描
+                    await asyncio.sleep(1)
+                    continue
+
+                next_time = future_events[0][0]
+                delay_seconds = (next_time - now).total_seconds()
                 if delay_seconds > 0:
+                    # 精确休眠到下一个触发时刻
                     await asyncio.sleep(delay_seconds)
 
-                now = datetime.now()
-                # 触发所有已到期（误差<1秒）的任务
-                for nt, user_id, job_type in events:
-                    if 0 <= (nt - now).total_seconds() < 1:
-                        if job_type == 'code':
-                            asyncio.create_task(self._execute_scheduled_job(user_id))
-                        elif job_type == 'withdraw':
-                            asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
+                    # 休眠后，立即触发所有到达该时刻的任务（误差容忍100ms）
+                    now = datetime.now()
+                    for nt, user_id, job_type in future_events:
+                        if (nt - now).total_seconds() < 0.1:  # 容忍100ms误差
+                            logger.info(f"⏰ 触发准时任务: 用户 {user_id}, 类型 {job_type}, 实际时间 {now.strftime('%H:%M:%S.%f')}")
+                            if job_type == 'code':
+                                asyncio.create_task(self._execute_scheduled_job(user_id))
+                            elif job_type == 'withdraw':
+                                asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
 
-                await asyncio.sleep(0.1)
+                # 短暂让出控制权，避免忙等
+                await asyncio.sleep(0.01)
 
             except Exception as e:
                 logger.error(f"高精度调度循环异常: {e}")
-                await asyncio.sleep(30)
+                await asyncio.sleep(30)  # 出错后等待30秒恢复
 
-    # ---------- Cron 解析辅助（已存在，无需改动） ----------
+    # ---------- Cron 解析辅助 ----------
     def _parse_cron(self, cron_expr: str) -> dict:
         parts = cron_expr.split()
         if len(parts) == 5:
@@ -2263,7 +2285,7 @@ class KuwoPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        logger.info("✅ 酷我插件 2.12.0 高精度毫秒级调度版已加载")
+        logger.info("✅ 酷我插件 2.12.1 高精度毫秒级调度版已加载")
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 高精度定时调度器已启动（毫秒级精准触发）")
