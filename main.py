@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（高精度毫秒级调度版）
+# 3. AstrBot 插件主类（高精度毫秒级调度版 + 自动迁移）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -374,7 +374,7 @@ class KuwoPlugin(Star):
         self.config = config or {}
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
         self.verification_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
-        # ⬇️ 已修改：添加 0 点
+        # 包含0点的默认提现Cron
         self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 0,9,13,17,20 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
@@ -2277,6 +2277,21 @@ class KuwoPlugin(Star):
     # ---------- 生命周期 ----------
     async def initialize(self):
         logger.info("✅ 酷我插件 2.12.1 高精度毫秒级调度版已加载（默认提现时间已含0点）")
+        # 自动迁移：为所有用户更新提现Cron（若为旧值则替换）
+        all_data = await self._load_all_data()
+        updated = False
+        new_cron = "0 0 0,9,13,17,20 * * *"
+        old_cron = "0 0 9,13,17,20 * * *"
+        for user_id, user_data in all_data.items():
+            wjob = user_data.get("withdraw_scheduled_job", {})
+            if wjob.get("cron") == old_cron:
+                wjob["cron"] = new_cron
+                updated = True
+                logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_cron}")
+        if updated:
+            await self._save_all_data(all_data)
+            logger.info("✅ 所有用户的提现Cron已迁移完成")
+
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("✅ 高精度定时调度器已启动（毫秒级精准触发）")
