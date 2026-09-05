@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（最终版：保留用户自定义规则，秒级去重，优化定时菜单）
+# 3. AstrBot 插件主类（最终修复版：防止重复消息处理 + 删除确认）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -558,7 +558,6 @@ class KuwoPlugin(Star):
             "0️⃣ 返回主菜单"
         )
 
-    # 新增：动态生成定时菜单
     async def _get_verify_timer_menu(self, user_id: str) -> str:
         user_data = await self._load_data(user_id)
         job = user_data.get('scheduled_job', {})
@@ -756,6 +755,7 @@ class KuwoPlugin(Star):
                 yield event.plain_result("⚠️ 内部错误，未能获取验证码菜单，请重试或重新绑定账号。")
             return
         elif text == "2":
+            setattr(event, '_timer_choice_processed', True)  # 关键：标记该消息已用于进入定时菜单
             self._update_state(user_id, menu='verify_timer', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(await self._get_verify_timer_menu(user_id))
@@ -763,7 +763,8 @@ class KuwoPlugin(Star):
     # ========== 定时获取验证码子菜单 ==========
     @filter.regex(r'^[0-4]$')
     async def handle_verify_timer_choice(self, event: AstrMessageEvent):
-        if getattr(event, '_main_choice_processed', False) or getattr(event, '_verify_choice_processed', False):
+        # 检查消息是否已被其他处理器处理
+        if getattr(event, '_main_choice_processed', False) or getattr(event, '_verify_choice_processed', False) or getattr(event, '_timer_choice_processed', False):
             return
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
@@ -793,14 +794,13 @@ class KuwoPlugin(Star):
                     "例如：12 55 8,12,16,19 * * *\n"
                     "输入 0 取消"
                 )
-            elif text == "2":  # 删除规则
-                user_data['scheduled_job'] = {"cron": None, "enabled": False, "last_executed": None}
-                await self._save_data(user_id, user_data)
+            elif text == "2":  # 删除规则 -> 进入确认
+                setattr(event, '_timer_choice_processed', True)
+                self._update_state(user_id, step='confirm_delete_timer')
                 self._schedule_timeout(user_id)
-                yield event.plain_result("✅ 定时规则已删除。")
-                self._schedule_timeout(user_id)
-                yield event.plain_result(await self._get_verify_timer_menu(user_id))
+                yield event.plain_result("⚠️ 确定要删除定时规则吗？(y/n)")
             elif text == "3":  # 立即执行
+                setattr(event, '_timer_choice_processed', True)
                 self._schedule_timeout(user_id)
                 yield event.plain_result("⏳ 正在执行定时任务，请稍候...")
                 asyncio.create_task(self._execute_scheduled_job(user_id, is_manual=True))
@@ -826,6 +826,27 @@ class KuwoPlugin(Star):
                 self._schedule_timeout(user_id)
                 yield event.plain_result("❌ 无效选项，请重新选择。")
                 yield event.plain_result(await self._get_verify_timer_menu(user_id))
+
+    # ========== 删除确认处理 ==========
+    @filter.regex(r'^[yYnN]$')
+    async def handle_confirm_delete_timer(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'confirm_delete_timer':
+            return
+        self._cancel_timeout(user_id)
+        self._schedule_timeout(user_id)
+        choice = event.message_str.strip().lower()
+        if choice == 'y':
+            user_data = await self._load_data(user_id)
+            user_data['scheduled_job'] = {"cron": None, "enabled": False, "last_executed": None}
+            await self._save_data(user_id, user_data)
+            yield event.plain_result("✅ 定时规则已删除。")
+        else:
+            yield event.plain_result("操作已取消。")
+        self._update_state(user_id, menu='verify_timer', step=None)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(await self._get_verify_timer_menu(user_id))
 
     # ========== 定时任务设置：输入 cron 表达式 ==========
     @filter.regex(r'^.+$')
