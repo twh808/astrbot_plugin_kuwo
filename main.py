@@ -366,14 +366,14 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（最终版：保留用户自定义规则，新用户默认模板）
+# 3. AstrBot 插件主类（最终版：保留用户自定义规则，秒级去重，优化定时菜单）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
-        self.verification_cron = self.config.get('verification_cron', "15 55 8,12,16,19 * * *")  # 默认模板
+        self.verification_cron = self.config.get('verification_cron', "15 55 8,12,16,19 * * *")
         self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 0,9,13,17,20 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
@@ -406,7 +406,6 @@ class KuwoPlugin(Star):
     async def _load_data(self, user_id: str) -> dict:
         all_data = await self._load_all_data()
         if user_id not in all_data:
-            # 新用户：使用默认模板，且启用
             all_data[user_id] = {
                 "accounts": [],
                 "auth_limit": self.default_auth_limit,
@@ -414,7 +413,7 @@ class KuwoPlugin(Star):
                 "verification_codes": {},
                 "cron": self.verification_cron,
                 "scheduled_job": {
-                    "cron": self.verification_cron,  # 默认模板
+                    "cron": self.verification_cron,
                     "enabled": True,
                     "last_executed": None
                 },
@@ -426,7 +425,6 @@ class KuwoPlugin(Star):
                 "last_withdraw_log": None
             }
         else:
-            # 已有用户：只补缺，不修改已有值
             user_data = all_data[user_id]
             if "scheduled_job" not in user_data:
                 user_data["scheduled_job"] = {
@@ -435,7 +433,6 @@ class KuwoPlugin(Star):
                     "last_executed": None
                 }
             else:
-                # 检查并补充缺失字段，但不覆盖已有值
                 if "cron" not in user_data["scheduled_job"]:
                     user_data["scheduled_job"]["cron"] = self.verification_cron
                 if "enabled" not in user_data["scheduled_job"]:
@@ -561,15 +558,29 @@ class KuwoPlugin(Star):
             "0️⃣ 返回主菜单"
         )
 
-    def _verify_timer_menu(self) -> str:
-        return (
-            "⏰ 定时获取验证码\n"
-            "1️⃣ 查看定时任务\n"
-            "2️⃣ 设置定时规则\n"
-            "3️⃣ 删除定时规则\n"
-            "4️⃣ 立即执行一次\n"
-            "0️⃣ 返回"
-        )
+    # 新增：动态生成定时菜单
+    async def _get_verify_timer_menu(self, user_id: str) -> str:
+        user_data = await self._load_data(user_id)
+        job = user_data.get('scheduled_job', {})
+        has_rule = bool(job.get('cron')) and job.get('enabled', False)
+        
+        if has_rule:
+            cron = job.get('cron')
+            return (
+                f"⏰ 定时获取验证码\n"
+                f"当前规则：{cron} (已启用)\n"
+                "1️⃣ 修改定时规则\n"
+                "2️⃣ 删除定时规则\n"
+                "3️⃣ 立即执行一次\n"
+                "0️⃣ 返回"
+            )
+        else:
+            return (
+                "⏰ 定时获取验证码\n"
+                "当前未设置定时规则\n"
+                "1️⃣ 设置定时规则\n"
+                "0️⃣ 返回"
+            )
 
     def _withdraw_menu(self) -> str:
         return (
@@ -747,7 +758,7 @@ class KuwoPlugin(Star):
         elif text == "2":
             self._update_state(user_id, menu='verify_timer', step=None)
             self._schedule_timeout(user_id)
-            yield event.plain_result(self._verify_timer_menu())
+            yield event.plain_result(await self._get_verify_timer_menu(user_id))
 
     # ========== 定时获取验证码子菜单 ==========
     @filter.regex(r'^[0-4]$')
@@ -766,54 +777,55 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._verify_menu())
             return
-        elif text == "1":
-            user_data = await self._load_data(user_id)
-            job = user_data.get('scheduled_job', {})
-            if not job.get('cron') or not job.get('enabled'):
+
+        user_data = await self._load_data(user_id)
+        job = user_data.get('scheduled_job', {})
+        has_rule = bool(job.get('cron')) and job.get('enabled', False)
+
+        if has_rule:
+            if text == "1":  # 修改规则
+                setattr(event, '_timer_choice_processed', True)
+                self._update_state(user_id, step='set_timer_cron')
                 self._schedule_timeout(user_id)
-                yield event.plain_result("⏰ 当前没有启用的定时任务。")
+                yield event.plain_result(
+                    "📝 请输入新的cron表达式（格式：秒 分 时 日 月 周）\n"
+                    "支持：*（任意）、数字、逗号分隔、范围(1-5)、步长(*/5)\n"
+                    "例如：12 55 8,12,16,19 * * *\n"
+                    "输入 0 取消"
+                )
+            elif text == "2":  # 删除规则
+                user_data['scheduled_job'] = {"cron": None, "enabled": False, "last_executed": None}
+                await self._save_data(user_id, user_data)
                 self._schedule_timeout(user_id)
-                yield event.plain_result(self._verify_timer_menu())
-                return
-            last_exec = job.get('last_executed', '从未执行')
-            self._schedule_timeout(user_id)
-            yield event.plain_result(
-                f"⏰ 定时任务信息\n"
-                f"📅 Cron: {job.get('cron')}\n"
-                f"✅ 状态: 已启用\n"
-                f"🕐 上次执行: {last_exec}"
-            )
-            self._schedule_timeout(user_id)
-            yield event.plain_result(self._verify_timer_menu())
-        elif text == "2":
-            setattr(event, '_timer_choice_processed', True)
-            self._update_state(user_id, step='set_timer_cron')
-            self._schedule_timeout(user_id)
-            yield event.plain_result(
-                "📝 请输入cron表达式（格式：秒 分 时 日 月 周）\n"
-                "支持：*（任意）、数字、逗号分隔、范围(1-5)、步长(*/5)\n"
-                "例如：12 55 8,12,16,19 * * *\n"
-                "输入 0 取消"
-            )
-        elif text == "3":
-            user_data = await self._load_data(user_id)
-            job = user_data.get('scheduled_job', {})
-            if not job.get('cron'):
+                yield event.plain_result("✅ 定时规则已删除。")
                 self._schedule_timeout(user_id)
-                yield event.plain_result("❌ 当前没有定时规则。")
+                yield event.plain_result(await self._get_verify_timer_menu(user_id))
+            elif text == "3":  # 立即执行
                 self._schedule_timeout(user_id)
-                yield event.plain_result(self._verify_timer_menu())
-                return
-            user_data['scheduled_job'] = {"cron": None, "enabled": False, "last_executed": None}
-            await self._save_data(user_id, user_data)
-            self._schedule_timeout(user_id)
-            yield event.plain_result("✅ 定时规则已删除。")
-            self._schedule_timeout(user_id)
-            yield event.plain_result(self._verify_timer_menu())
-        elif text == "4":
-            self._schedule_timeout(user_id)
-            yield event.plain_result("⏳ 正在执行定时任务，请稍候...")
-            asyncio.create_task(self._execute_scheduled_job(user_id, is_manual=True))
+                yield event.plain_result("⏳ 正在执行定时任务，请稍候...")
+                asyncio.create_task(self._execute_scheduled_job(user_id, is_manual=True))
+                self._update_state(user_id, menu='verify_timer', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(await self._get_verify_timer_menu(user_id))
+            else:
+                self._schedule_timeout(user_id)
+                yield event.plain_result("❌ 无效选项，请重新选择。")
+                yield event.plain_result(await self._get_verify_timer_menu(user_id))
+        else:
+            if text == "1":  # 设置规则
+                setattr(event, '_timer_choice_processed', True)
+                self._update_state(user_id, step='set_timer_cron')
+                self._schedule_timeout(user_id)
+                yield event.plain_result(
+                    "📝 请输入cron表达式（格式：秒 分 时 日 月 周）\n"
+                    "支持：*（任意）、数字、逗号分隔、范围(1-5)、步长(*/5)\n"
+                    "例如：12 55 8,12,16,19 * * *\n"
+                    "输入 0 取消"
+                )
+            else:
+                self._schedule_timeout(user_id)
+                yield event.plain_result("❌ 无效选项，请重新选择。")
+                yield event.plain_result(await self._get_verify_timer_menu(user_id))
 
     # ========== 定时任务设置：输入 cron 表达式 ==========
     @filter.regex(r'^.+$')
@@ -829,7 +841,7 @@ class KuwoPlugin(Star):
         if text == "0":
             self._update_state(user_id, menu='verify_timer', step=None)
             self._schedule_timeout(user_id)
-            yield event.plain_result(self._verify_timer_menu())
+            yield event.plain_result(await self._get_verify_timer_menu(user_id))
             return
 
         parts = text.split()
@@ -856,7 +868,7 @@ class KuwoPlugin(Star):
         yield event.plain_result(f"✅ 定时规则已设置：{text}\n定时任务将在匹配时间自动执行。")
         self._update_state(user_id, menu='verify_timer', step=None)
         self._schedule_timeout(user_id)
-        yield event.plain_result(self._verify_timer_menu())
+        yield event.plain_result(await self._get_verify_timer_menu(user_id))
 
     # ---------- 提现子菜单 ----------
     @filter.regex(r'^[0-2]$')
@@ -1467,7 +1479,7 @@ class KuwoPlugin(Star):
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ======================================================================
-    # 高精度调度器（低CPU占用版 + 去重）
+    # 高精度调度器（低CPU占用版 + 秒级去重）
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
         """
