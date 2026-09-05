@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（高精度毫秒级调度版 + 自动迁移）
+# 3. AstrBot 插件主类（高精度毫秒级调度版 + 自动迁移 + 优化排版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -374,7 +374,6 @@ class KuwoPlugin(Star):
         self.config = config or {}
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
         self.verification_cron = self.config.get('verification_cron', "12 55 8,12,16,19 * * *")
-        # 包含0点的默认提现Cron
         self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 0,9,13,17,20 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
@@ -1603,7 +1602,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出管理面板")
             return
-        elif text == "1":  # 查看所有账号
+        elif text == "1":  # 查看所有账号（优化排版）
             all_data = await self._load_all_data()
             if not all_data:
                 self._schedule_timeout(user_id)
@@ -1612,15 +1611,17 @@ class KuwoPlugin(Star):
                 self._schedule_timeout(user_id)
                 yield event.plain_result(self._admin_menu())
                 return
-            lines = []
+            lines = ["📋 所有用户账号信息：", ""]
             for uid, udata in all_data.items():
                 accounts = udata.get('accounts', [])
+                lines.append(f"👤 QQ {uid}")
                 if accounts:
-                    phones = ', '.join([a['phone'] for a in accounts])
-                    lines.append(f"👤 {uid} -> {phones}")
+                    for acc in accounts:
+                        lines.append(f"   📱 {acc['phone']}")
                 else:
-                    lines.append(f"👤 {uid} -> (无账号)")
-            result = "📋 所有用户账号信息：\n" + "\n".join(lines)
+                    lines.append("   (无账号)")
+                lines.append("")  # 空行分隔
+            result = "\n".join(lines)
             self._schedule_timeout(user_id)
             yield event.plain_result(result)
             self._update_state(user_id, menu='admin', step=None)
