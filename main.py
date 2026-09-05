@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（最终修复版：防止重复消息处理 + 删除确认）
+# 3. AstrBot 插件主类（最终版：示例已修改为15 55...）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -755,7 +755,7 @@ class KuwoPlugin(Star):
                 yield event.plain_result("⚠️ 内部错误，未能获取验证码菜单，请重试或重新绑定账号。")
             return
         elif text == "2":
-            setattr(event, '_timer_choice_processed', True)  # 关键：标记该消息已用于进入定时菜单
+            setattr(event, '_timer_choice_processed', True)
             self._update_state(user_id, menu='verify_timer', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(await self._get_verify_timer_menu(user_id))
@@ -763,7 +763,6 @@ class KuwoPlugin(Star):
     # ========== 定时获取验证码子菜单 ==========
     @filter.regex(r'^[0-4]$')
     async def handle_verify_timer_choice(self, event: AstrMessageEvent):
-        # 检查消息是否已被其他处理器处理
         if getattr(event, '_main_choice_processed', False) or getattr(event, '_verify_choice_processed', False) or getattr(event, '_timer_choice_processed', False):
             return
         user_id = event.get_sender_id()
@@ -791,7 +790,7 @@ class KuwoPlugin(Star):
                 yield event.plain_result(
                     "📝 请输入新的cron表达式（格式：秒 分 时 日 月 周）\n"
                     "支持：*（任意）、数字、逗号分隔、范围(1-5)、步长(*/5)\n"
-                    "例如：12 55 8,12,16,19 * * *\n"
+                    "例如：15 55 8,12,16,19 * * *\n"
                     "输入 0 取消"
                 )
             elif text == "2":  # 删除规则 -> 进入确认
@@ -819,7 +818,7 @@ class KuwoPlugin(Star):
                 yield event.plain_result(
                     "📝 请输入cron表达式（格式：秒 分 时 日 月 周）\n"
                     "支持：*（任意）、数字、逗号分隔、范围(1-5)、步长(*/5)\n"
-                    "例如：12 55 8,12,16,19 * * *\n"
+                    "例如：15 55 8,12,16,19 * * *\n"
                     "输入 0 取消"
                 )
             else:
