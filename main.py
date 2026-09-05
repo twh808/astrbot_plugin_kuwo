@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（默认开启验证码定时 + 增强日志）
+# 3. AstrBot 插件主类（修复当前时刻触发 + 增强日志）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -411,7 +411,7 @@ class KuwoPlugin(Star):
                 "cron": self.verification_cron,
                 "scheduled_job": {
                     "cron": None,
-                    "enabled": True,   # 默认开启
+                    "enabled": True,
                     "last_executed": None
                 },
                 "withdraw_scheduled_job": {
@@ -422,7 +422,6 @@ class KuwoPlugin(Star):
                 "last_withdraw_log": None
             }
         else:
-            # 补全 scheduled_job
             if "scheduled_job" not in all_data[user_id]:
                 all_data[user_id]["scheduled_job"] = {
                     "cron": None,
@@ -437,7 +436,6 @@ class KuwoPlugin(Star):
                 if "last_executed" not in all_data[user_id]["scheduled_job"]:
                     all_data[user_id]["scheduled_job"]["last_executed"] = None
 
-            # 补全 withdraw_scheduled_job
             if "withdraw_scheduled_job" not in all_data[user_id]:
                 all_data[user_id]["withdraw_scheduled_job"] = {
                     "cron": self.default_withdraw_cron,
@@ -1431,15 +1429,15 @@ class KuwoPlugin(Star):
             logger.error(f"执行定时任务失败: {e}")
 
     # ======================================================================
-    # 高精度调度器（毫秒级精准触发 + 详细日志）
+    # 高精度调度器（修复当前时刻触发 + 增强日志）
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
         """
-        计算自 from_dt 之后的第一个匹配 Cron 表达式的时间点（精确到秒）
-        返回 datetime 对象，若一年内无匹配则返回 None
+        计算自 from_dt 开始的第一个匹配 Cron 表达式的时间点（精确到秒）
+        若当前时间匹配，则直接返回当前时间，避免延迟1秒导致错过。
         """
         cron_dict = self._parse_cron(cron_expr)
-        dt = from_dt + timedelta(seconds=1)
+        dt = from_dt  # 从当前时间开始，不+1秒
         limit = from_dt + timedelta(days=365)
         while dt <= limit:
             if self._match_cron(cron_dict, dt):
@@ -1472,16 +1470,16 @@ class KuwoPlugin(Star):
                             logger.debug(f"📅 用户 {user_id} 提现下次触发时间: {nt.strftime('%Y-%m-%d %H:%M:%S')}")
 
                 if not events:
-                    # 无任务，休眠60秒后继续扫描
                     logger.debug("⏳ 无待触发事件，休眠60秒")
                     await asyncio.sleep(60)
                     continue
 
-                # 按时间排序
                 events.sort(key=lambda x: x[0])
-                logger.debug(f"📋 当前共有 {len(events)} 个待触发事件")
+                # 打印所有事件的时间，便于调试
+                for nt, uid, typ in events:
+                    logger.debug(f"  事件: {uid} {typ} 于 {nt.strftime('%H:%M:%S.%f')}")
 
-                # 1. 立即处理所有已经到期的任务（nt <= now）
+                # 1. 处理所有已经到期的任务（nt <= now）
                 expired = [e for e in events if e[0] <= now]
                 for nt, user_id, job_type in expired:
                     logger.info(f"⏰ 触发已到期任务: 用户 {user_id}, 类型 {job_type}, 原定时间 {nt.strftime('%H:%M:%S.%f')}")
@@ -1503,7 +1501,7 @@ class KuwoPlugin(Star):
                 if delay_seconds > 0:
                     await asyncio.sleep(delay_seconds)
 
-                    # 休眠后，立即触发所有到达该时刻的任务（误差容忍100ms）
+                    # 休眠后，触发所有到达该时刻的任务（误差容忍100ms）
                     now = datetime.now()
                     for nt, user_id, job_type in future_events:
                         if (nt - now).total_seconds() < 0.1:
@@ -1513,12 +1511,12 @@ class KuwoPlugin(Star):
                             elif job_type == 'withdraw':
                                 asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
 
-                # 短暂让出控制权，避免忙等
+                # 短暂让出控制权
                 await asyncio.sleep(0.01)
 
             except Exception as e:
                 logger.error(f"高精度调度循环异常: {e}")
-                await asyncio.sleep(30)  # 出错后等待30秒恢复
+                await asyncio.sleep(30)
 
     # ---------- Cron 解析辅助 ----------
     def _parse_cron(self, cron_expr: str) -> dict:
@@ -2322,8 +2320,7 @@ class KuwoPlugin(Star):
                 wjob["cron"] = new_cron
                 updated = True
                 logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_cron}")
-            # 可选：将 scheduled_job 中缺失或为 False 的强制设为 True（如果希望强制开启）
-            # 如果不想强制，可以注释掉下面几行
+            # 强制开启验证码定时（若未开启）
             sjob = user_data.get("scheduled_job", {})
             if not sjob.get("enabled", False):
                 sjob["enabled"] = True
