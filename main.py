@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（采用执行锁去重，无冷却）
+# 3. AstrBot 插件主类（最终稳定版 + 低CPU调度）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -1439,7 +1439,6 @@ class KuwoPlugin(Star):
             logger.error(error_msg)
             await self._send_result(user_id, f"❌ {error_msg}")
         finally:
-            # 释放锁
             self._task_locks.discard(lock_key)
 
     async def _send_result(self, user_id: str, message: str):
@@ -1455,7 +1454,7 @@ class KuwoPlugin(Star):
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ======================================================================
-    # 高精度调度器（去重 + 精确休眠）
+    # 高精度调度器（低CPU占用版）
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
         """
@@ -1472,26 +1471,19 @@ class KuwoPlugin(Star):
         return None
 
     async def _scheduler_loop(self):
-        logger.info("🕐 高精度定时调度器已启动（毫秒级精准触发）")
-        heartbeat_counter = 0
+        logger.info("🕐 高精度定时调度器已启动（低CPU模式）")
         while self.scheduler_running:
             try:
                 now = datetime.now()
-                heartbeat_counter += 1
-                if heartbeat_counter % 10 == 0:
-                    logger.info(f"⏱️ [{now.strftime('%H:%M:%S')}] 调度器运行中... (心跳)")
-
                 all_data = await self._load_all_data()
                 events = []
 
                 for user_id, user_data in all_data.items():
-                    # 验证码定时
                     job = user_data.get('scheduled_job', {})
                     if job.get('cron') and job.get('enabled'):
                         nt = self._get_next_match_time(job['cron'], now)
                         if nt:
                             events.append((nt, user_id, 'code'))
-                    # 提现定时
                     wjob = user_data.get('withdraw_scheduled_job', {})
                     if wjob.get('cron') and wjob.get('enabled'):
                         nt = self._get_next_match_time(wjob['cron'], now)
@@ -1499,7 +1491,8 @@ class KuwoPlugin(Star):
                             events.append((nt, user_id, 'withdraw'))
 
                 if not events:
-                    await asyncio.sleep(10)
+                    # 无任何任务，休眠60秒后重新检查
+                    await asyncio.sleep(60)
                     continue
 
                 # 去重：同一用户同一类型只保留最早的一个
@@ -1511,10 +1504,7 @@ class KuwoPlugin(Star):
                 events = list(unique.values())
                 events.sort(key=lambda x: x[0])
 
-                if events:
-                    next_event = events[0]
-                    logger.info(f"⏳ 下一个触发: 用户 {next_event[1]}, 类型 {next_event[2]}, 时间 {next_event[0].strftime('%H:%M:%S.%f')}")
-
+                # 检查是否有已到期任务
                 expired = [e for e in events if e[0] <= now]
                 if expired:
                     for nt, uid, typ in expired:
@@ -1523,36 +1513,42 @@ class KuwoPlugin(Star):
                             asyncio.create_task(self._execute_scheduled_job(uid))
                         elif typ == 'withdraw':
                             asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
+                    # 处理完到期任务后，立即重新扫描
                     continue
 
-                if events:
-                    next_time = events[0][0]
-                    delay = (next_time - now).total_seconds()
-                    if delay > 0:
-                        if delay > 10:
-                            await asyncio.sleep(10)
-                        else:
-                            await asyncio.sleep(delay)
-                            now = datetime.now()
-                            for nt, uid, typ in events:
-                                if abs((nt - now).total_seconds()) < 0.1:
-                                    logger.info(f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 实际 {now.strftime('%H:%M:%S.%f')}")
-                                    if typ == 'code':
-                                        asyncio.create_task(self._execute_scheduled_job(uid))
-                                    elif typ == 'withdraw':
-                                        asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
+                # 无到期任务，计算距离下一个事件的时间
+                next_time = events[0][0]
+                delay = (next_time - now).total_seconds()
+                if delay > 0:
+                    # 如果距离下一个事件超过60秒，只休眠60秒然后重新计算（避免长时间不检查新任务）
+                    if delay > 60:
+                        await asyncio.sleep(60)
                     else:
-                        logger.warning(f"⚠️ 事件已过期，立即触发: {events[0][0].strftime('%H:%M:%S.%f')}")
-                        uid, typ = events[0][1], events[0][2]
-                        if typ == 'code':
-                            asyncio.create_task(self._execute_scheduled_job(uid))
-                        else:
-                            asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
+                        # 精确休眠到触发时间
+                        await asyncio.sleep(delay)
+                        # 醒来后触发所有到达该时刻的任务（容忍100ms误差）
+                        now = datetime.now()
+                        for nt, uid, typ in events:
+                            if abs((nt - now).total_seconds()) < 0.1:
+                                logger.info(f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 实际 {now.strftime('%H:%M:%S.%f')}")
+                                if typ == 'code':
+                                    asyncio.create_task(self._execute_scheduled_job(uid))
+                                elif typ == 'withdraw':
+                                    asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
+                else:
+                    # delay <= 0 说明已过期，立即触发
+                    logger.warning(f"⚠️ 事件已过期，立即触发: {events[0][0].strftime('%H:%M:%S.%f')}")
+                    uid, typ = events[0][1], events[0][2]
+                    if typ == 'code':
+                        asyncio.create_task(self._execute_scheduled_job(uid))
+                    else:
+                        asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
 
+                # 短暂让出控制权
                 await asyncio.sleep(0.01)
 
             except Exception as e:
-                logger.error(f"高精度调度循环异常: {e}")
+                logger.error(f"调度循环异常: {e}")
                 await asyncio.sleep(30)
 
     # ---------- Cron 解析辅助 ----------
@@ -2370,7 +2366,7 @@ class KuwoPlugin(Star):
 
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
-        logger.info("✅ 高精度定时调度器已启动（毫秒级精准触发）")
+        logger.info("✅ 高精度定时调度器已启动（低CPU模式）")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
