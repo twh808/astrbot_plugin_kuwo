@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（高精度毫秒级调度版 + 自动迁移 + 优化排版）
+# 3. AstrBot 插件主类（高精度毫秒级调度版 + 自动迁移 + 优化排版 + 修复超时误报）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -482,8 +482,11 @@ class KuwoPlugin(Star):
             del self.timeout_tasks[user_id]
 
     # ---------- 超时管理 ----------
+    # 修复：仅在状态仍然存在时发送超时消息，避免已退出交互后误报
     async def _timeout_callback(self, user_id: str):
-        state = self._get_state(user_id)
+        if user_id not in self.states:
+            return
+        state = self.states[user_id]
         if state.get('menu') or state.get('step'):
             umo = state.get('umo')
             if umo:
