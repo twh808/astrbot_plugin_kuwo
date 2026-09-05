@@ -19,7 +19,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 # ======================================================================
-# 1. 加密常量（完整）
+# 1. 加密常量（完整，不变）
 # ======================================================================
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
@@ -33,7 +33,7 @@ static_k = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 static_j = [13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1, 22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1, 40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1, 43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1]
 
 # ======================================================================
-# 2. 加密与 API 函数（完整）
+# 2. 加密与 API 函数（不变）
 # ======================================================================
 def func_a1(iArr, i2, j2):
     j3 = 0
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（修复当前时刻触发 + 增强日志）
+# 3. AstrBot 插件主类（完整修复调度）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -1371,30 +1371,35 @@ class KuwoPlugin(Star):
         logger.info(f"返回提示: {prompt[:50]}...")
         return prompt
 
+    # ---------- 定时任务执行（带详细日志和反馈） ----------
     async def _execute_scheduled_job(self, user_id: str, is_manual: bool = False):
         logger.info(f"🔔 执行验证码定时任务，用户 {user_id}，手动={is_manual}")
         try:
             user_data = await self._load_data(user_id)
             job = user_data.get('scheduled_job', {})
             if not job.get('cron') or not job.get('enabled'):
-                logger.info(f"用户 {user_id} 定时任务未启用或无规则")
+                msg = "⏰ 定时任务未启用或无规则，本次执行已跳过。"
+                logger.info(msg)
+                await self._send_result(user_id, msg)
                 return
 
+            # 更新最后执行时间
             user_data['scheduled_job']['last_executed'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             await self._save_data(user_id, user_data)
 
             accounts = user_data.get('accounts', [])
             if not accounts:
-                logger.info(f"用户 {user_id} 无绑定账号，跳过定时任务")
+                msg = "⚠️ 您还没有绑定账号，无法获取验证码。"
+                logger.info(msg)
+                await self._send_result(user_id, msg)
                 return
 
             auth_limit = user_data.get('auth_limit', 0)
             if auth_limit == 0:
-                logger.warning(f"用户 {user_id} 授权次数为0，定时任务跳过")
+                msg = "⚠️ 授权次数已用完，无法获取验证码。"
+                logger.info(msg)
+                await self._send_result(user_id, msg)
                 return
-
-            state = self._get_state(user_id)
-            umo = state.get('umo')
 
             target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
             results = []
@@ -1414,30 +1419,39 @@ class KuwoPlugin(Star):
                 results.append(f"{'✅' if success else '❌'} {phone}: {msg}")
                 await asyncio.sleep(0.5)
 
-            result_msg = f"⏰ 定时获取验证码完成\n" + "\n".join(results)
+            result_msg = "⏰ 定时获取验证码完成\n" + "\n".join(results)
             if is_manual:
                 result_msg = "🔹 手动执行结果：\n" + result_msg
-            if umo:
-                try:
-                    await self.context.send_message(umo, MessageChain().message(result_msg))
-                except Exception as e:
-                    logger.error(f"发送定时结果失败: {e}")
-            else:
-                logger.info(f"定时任务执行结果（用户 {user_id}）：\n{result_msg}")
+            logger.info(result_msg)
+            await self._send_result(user_id, result_msg)
 
         except Exception as e:
-            logger.error(f"执行定时任务失败: {e}")
+            error_msg = f"执行定时任务失败: {e}"
+            logger.error(error_msg)
+            await self._send_result(user_id, f"❌ {error_msg}")
+
+    async def _send_result(self, user_id: str, message: str):
+        """发送结果消息给用户（如果有可用会话）"""
+        state = self._get_state(user_id)
+        umo = state.get('umo')
+        if umo:
+            try:
+                await self.context.send_message(umo, MessageChain().message(message))
+            except Exception as e:
+                logger.error(f"发送消息失败: {e}")
+        else:
+            logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ======================================================================
-    # 高精度调度器（修复当前时刻触发 + 增强日志）
+    # 高精度调度器（修复当前时刻触发 + 详细日志）
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
         """
         计算自 from_dt 开始的第一个匹配 Cron 表达式的时间点（精确到秒）
-        若当前时间匹配，则直接返回当前时间，避免延迟1秒导致错过。
+        若当前时间匹配，则直接返回当前时间。
         """
         cron_dict = self._parse_cron(cron_expr)
-        dt = from_dt  # 从当前时间开始，不+1秒
+        dt = from_dt
         limit = from_dt + timedelta(days=365)
         while dt <= limit:
             if self._match_cron(cron_dict, dt):
@@ -1454,20 +1468,20 @@ class KuwoPlugin(Star):
                 events = []
 
                 for user_id, user_data in all_data.items():
-                    # 获取验证码定时任务
+                    # 验证码定时
                     job = user_data.get('scheduled_job', {})
                     if job.get('cron') and job.get('enabled'):
                         nt = self._get_next_match_time(job['cron'], now)
                         if nt:
                             events.append((nt, user_id, 'code'))
-                            logger.debug(f"📅 用户 {user_id} 验证码下次触发时间: {nt.strftime('%Y-%m-%d %H:%M:%S')}")
-                    # 提现定时任务
+                            logger.debug(f"📅 用户 {user_id} 验证码下次触发: {nt.strftime('%Y-%m-%d %H:%M:%S')}")
+                    # 提现定时
                     wjob = user_data.get('withdraw_scheduled_job', {})
                     if wjob.get('cron') and wjob.get('enabled'):
                         nt = self._get_next_match_time(wjob['cron'], now)
                         if nt:
                             events.append((nt, user_id, 'withdraw'))
-                            logger.debug(f"📅 用户 {user_id} 提现下次触发时间: {nt.strftime('%Y-%m-%d %H:%M:%S')}")
+                            logger.debug(f"📅 用户 {user_id} 提现下次触发: {nt.strftime('%Y-%m-%d %H:%M:%S')}")
 
                 if not events:
                     logger.debug("⏳ 无待触发事件，休眠60秒")
@@ -1475,41 +1489,44 @@ class KuwoPlugin(Star):
                     continue
 
                 events.sort(key=lambda x: x[0])
-                # 打印所有事件的时间，便于调试
-                for nt, uid, typ in events:
-                    logger.debug(f"  事件: {uid} {typ} 于 {nt.strftime('%H:%M:%S.%f')}")
+                # 打印最近事件
+                next_event = events[0]
+                logger.info(f"⏳ 下一个触发: 用户 {next_event[1]}, 类型 {next_event[2]}, 时间 {next_event[0].strftime('%H:%M:%S.%f')}")
 
-                # 1. 处理所有已经到期的任务（nt <= now）
+                # 检查是否有到期事件
                 expired = [e for e in events if e[0] <= now]
-                for nt, user_id, job_type in expired:
-                    logger.info(f"⏰ 触发已到期任务: 用户 {user_id}, 类型 {job_type}, 原定时间 {nt.strftime('%H:%M:%S.%f')}")
-                    if job_type == 'code':
-                        asyncio.create_task(self._execute_scheduled_job(user_id))
-                    elif job_type == 'withdraw':
-                        asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
-
-                # 2. 查找下一个未到期的任务
-                future_events = [e for e in events if e[0] > now]
-                if not future_events:
-                    # 所有事件都已过期，等待1秒后重新扫描
-                    await asyncio.sleep(1)
+                if expired:
+                    for nt, user_id, job_type in expired:
+                        logger.info(f"⏰ 触发已到期任务: 用户 {user_id}, 类型 {job_type}, 原定 {nt.strftime('%H:%M:%S.%f')}")
+                        if job_type == 'code':
+                            asyncio.create_task(self._execute_scheduled_job(user_id))
+                        elif job_type == 'withdraw':
+                            asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
+                    # 处理完到期任务后，继续循环
                     continue
 
-                next_time = future_events[0][0]
-                delay_seconds = (next_time - now).total_seconds()
-                logger.info(f"⏳ 下一个触发时间: {next_time.strftime('%H:%M:%S.%f')}，等待 {delay_seconds:.3f} 秒")
-                if delay_seconds > 0:
-                    await asyncio.sleep(delay_seconds)
-
-                    # 休眠后，触发所有到达该时刻的任务（误差容忍100ms）
+                # 没有到期事件，计算下一个事件的等待时间并休眠
+                next_time = next_event[0]
+                delay = (next_time - now).total_seconds()
+                if delay > 0:
+                    logger.info(f"⏳ 等待 {delay:.3f} 秒直至 {next_time.strftime('%H:%M:%S.%f')}")
+                    await asyncio.sleep(delay)
+                    # 醒来后触发该任务（可能有多个任务同时）
                     now = datetime.now()
-                    for nt, user_id, job_type in future_events:
-                        if (nt - now).total_seconds() < 0.1:
-                            logger.info(f"⏰ 触发准时任务: 用户 {user_id}, 类型 {job_type}, 实际时间 {now.strftime('%H:%M:%S.%f')}")
+                    for nt, user_id, job_type in events:
+                        if abs((nt - now).total_seconds()) < 0.1:  # 100ms误差
+                            logger.info(f"⏰ 触发准时任务: 用户 {user_id}, 类型 {job_type}, 实际 {now.strftime('%H:%M:%S.%f')}")
                             if job_type == 'code':
                                 asyncio.create_task(self._execute_scheduled_job(user_id))
                             elif job_type == 'withdraw':
                                 asyncio.create_task(self._execute_withdraw_scheduled_job(user_id))
+                else:
+                    # 如果delay <=0，说明已经过期（但之前未检测到），立即处理
+                    logger.warning(f"⚠️ 事件已过期，立即触发: {next_event[0].strftime('%H:%M:%S.%f')}")
+                    if next_event[2] == 'code':
+                        asyncio.create_task(self._execute_scheduled_job(next_event[1]))
+                    else:
+                        asyncio.create_task(self._execute_withdraw_scheduled_job(next_event[1]))
 
                 # 短暂让出控制权
                 await asyncio.sleep(0.01)
