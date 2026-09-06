@@ -19,7 +19,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 # ======================================================================
-# 1. 加密常量（完整）
+# 1. 加密常量（完整，不变）
 # ======================================================================
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（最终版，调度间隔改为30秒）
+# 3. AstrBot 插件主类（最终版：加载时去重 + 绑定覆盖）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -425,6 +425,19 @@ class KuwoPlugin(Star):
             }
         else:
             user_data = all_data[user_id]
+            # ====== 新增：加载时对 accounts 去重（按手机号，保留最后一个） ======
+            if "accounts" in user_data and len(user_data["accounts"]) > 1:
+                unique_dict = {}
+                for acc in user_data["accounts"]:
+                    phone = acc.get("phone")
+                    if phone:
+                        unique_dict[phone] = acc  # 后面覆盖前面，保留最后一个
+                new_accounts = list(unique_dict.values())
+                if len(new_accounts) < len(user_data["accounts"]):
+                    logger.info(f"🔄 用户 {user_id} 的账号列表存在重复，已去重（原 {len(user_data['accounts'])} 个，去重后 {len(new_accounts)} 个）")
+                    user_data["accounts"] = new_accounts
+            # ==========================================================
+
             if "scheduled_job" not in user_data:
                 user_data["scheduled_job"] = {
                     "cron": self.verification_cron,
@@ -457,6 +470,14 @@ class KuwoPlugin(Star):
         return all_data[user_id]
 
     async def _save_data(self, user_id: str, user_data: dict):
+        # 保存前再次去重（保险）
+        if "accounts" in user_data:
+            unique_dict = {}
+            for acc in user_data["accounts"]:
+                phone = acc.get("phone")
+                if phone:
+                    unique_dict[phone] = acc
+            user_data["accounts"] = list(unique_dict.values())
         all_data = await self._load_all_data()
         all_data[user_id] = user_data
         await self._save_all_data(all_data)
@@ -1123,9 +1144,14 @@ class KuwoPlugin(Star):
                 if not phone or not password:
                     errors.append(f"格式错误: {part}")
                     continue
-                existing = [a for a in user_data["accounts"] if a["phone"] == phone]
+                # 检查是否已存在该手机号，若存在则更新密码（覆盖）
+                existing = None
+                for acc in user_data["accounts"]:
+                    if acc["phone"] == phone:
+                        existing = acc
+                        break
                 if existing:
-                    existing[0]["password"] = password
+                    existing["password"] = password
                 else:
                     new_accounts.append({"phone": phone, "password": password})
             except ValueError:
@@ -1136,12 +1162,15 @@ class KuwoPlugin(Star):
             return
         if new_accounts:
             user_data["accounts"].extend(new_accounts)
+        # 如果有更新或新增，保存
+        if new_accounts or errors:
             await self._save_data(user_id, user_data)
-            self._schedule_timeout(user_id)
+        # 输出反馈
+        if new_accounts:
             yield event.plain_result(f"✅ 成功绑定 {len(new_accounts)} 个账号，当前共 {len(user_data['accounts'])} 个账号")
         else:
-            self._schedule_timeout(user_id)
-            yield event.plain_result("✅ 账号信息已更新（无新增）")
+            if not errors:
+                yield event.plain_result("✅ 账号信息已更新（无新增）")
         self._update_state(user_id, menu='account', step=None)
         self._schedule_timeout(user_id)
         yield event.plain_result(self._account_menu())
@@ -1418,7 +1447,7 @@ class KuwoPlugin(Star):
         logger.info(f"返回提示: {prompt[:50]}...")
         return prompt
 
-    # ---------- 验证码任务执行（秒级去重） ----------
+    # ---------- 验证码任务执行（秒级去重 + 账号去重） ----------
     async def _execute_scheduled_job(self, user_id: str, is_manual: bool = False):
         lock_key = f"{user_id}_code"
         if not is_manual:
@@ -1457,8 +1486,19 @@ class KuwoPlugin(Star):
                 return
 
             target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
-            results = []
+            # 去重：按手机号去重，保留第一个出现的
+            seen = set()
+            unique_accounts = []
             for acc in target_accounts:
+                phone = acc['phone']
+                if phone not in seen:
+                    seen.add(phone)
+                    unique_accounts.append(acc)
+            if len(unique_accounts) < len(target_accounts):
+                logger.info(f"⚠️ 检测到重复的手机号，已去重（原 {len(target_accounts)} 个，去重后 {len(unique_accounts)} 个）")
+
+            results = []
+            for acc in unique_accounts:
                 phone = acc['phone']
                 password = acc['password']
                 login = login_kuwo(phone, password)
@@ -1531,7 +1571,7 @@ class KuwoPlugin(Star):
                             events.append((nt, user_id, 'withdraw'))
 
                 if not events:
-                    await asyncio.sleep(30)  # 无任务时30秒扫描一次
+                    await asyncio.sleep(30)
                     continue
 
                 unique = {}
@@ -1545,6 +1585,10 @@ class KuwoPlugin(Star):
                 expired = [e for e in events if e[0] <= now]
                 if expired:
                     for nt, uid, typ in expired:
+                        lock_key = f"{uid}_{typ}"
+                        last = self._last_trigger_time.get(lock_key)
+                        if last and last.year == now.year and last.month == now.month and last.day == now.day and last.hour == now.hour and last.minute == now.minute and last.second == now.second:
+                            continue
                         logger.info(f"⏰ 触发定时任务: 用户 {uid}, 类型 {typ}, 原定 {nt.strftime('%H:%M:%S.%f')}")
                         if typ == 'code':
                             asyncio.create_task(self._execute_scheduled_job(uid))
@@ -1562,6 +1606,10 @@ class KuwoPlugin(Star):
                         now = datetime.now()
                         for nt, uid, typ in events:
                             if abs((nt - now).total_seconds()) < 0.1:
+                                lock_key = f"{uid}_{typ}"
+                                last = self._last_trigger_time.get(lock_key)
+                                if last and last.year == now.year and last.month == now.month and last.day == now.day and last.hour == now.hour and last.minute == now.minute and last.second == now.second:
+                                    continue
                                 logger.info(f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 实际 {now.strftime('%H:%M:%S.%f')}")
                                 if typ == 'code':
                                     asyncio.create_task(self._execute_scheduled_job(uid))
@@ -1570,10 +1618,13 @@ class KuwoPlugin(Star):
                 else:
                     logger.warning(f"⚠️ 事件已过期，立即触发: {events[0][0].strftime('%H:%M:%S.%f')}")
                     uid, typ = events[0][1], events[0][2]
-                    if typ == 'code':
-                        asyncio.create_task(self._execute_scheduled_job(uid))
-                    else:
-                        asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
+                    lock_key = f"{uid}_{typ}"
+                    last = self._last_trigger_time.get(lock_key)
+                    if not (last and last.year == now.year and last.month == now.month and last.day == now.day and last.hour == now.hour and last.minute == now.minute and last.second == now.second):
+                        if typ == 'code':
+                            asyncio.create_task(self._execute_scheduled_job(uid))
+                        else:
+                            asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
 
                 await asyncio.sleep(0.01)
 
@@ -2343,9 +2394,14 @@ class KuwoPlugin(Star):
                 if not phone or not password:
                     errors.append(f"格式错误: {part}")
                     continue
-                existing = [a for a in user_data["accounts"] if a["phone"] == phone]
+                # 检查是否已存在该手机号，若存在则更新密码（覆盖）
+                existing = None
+                for acc in user_data["accounts"]:
+                    if acc["phone"] == phone:
+                        existing = acc
+                        break
                 if existing:
-                    existing[0]["password"] = password
+                    existing["password"] = password
                 else:
                     new_accounts.append({"phone": phone, "password": password})
             except ValueError:
@@ -2362,6 +2418,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(f"✅ 成功为 {target_uid} 绑定 {len(new_accounts)} 个账号，当前共 {len(user_data['accounts'])} 个账号")
         else:
+            await self._save_data(target_uid, user_data)  # 确保更新密码被保存
             self._schedule_timeout(user_id)
             yield event.plain_result("✅ 账号信息已更新（无新增）")
 
@@ -2372,6 +2429,7 @@ class KuwoPlugin(Star):
     # ---------- 生命周期 ----------
     async def initialize(self):
         logger.info("🚀 酷我插件正在初始化...")
+        # 加载时自动清理所有用户的重复账号（已由 _load_data 处理）
         all_data = await self._load_all_data()
         updated = False
         new_cron = "0 0 0,9,13,17,20 * * *"
