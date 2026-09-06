@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（最终版）
+# 3. AstrBot 插件主类（最终版，调度间隔改为30秒）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -393,7 +393,6 @@ class KuwoPlugin(Star):
 
         self.num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
-        # 记录上次触发的时间（用于秒级去重，仅由任务函数管理）
         self._last_trigger_time = {}
 
     # ---------- 数据持久化 ----------
@@ -1499,13 +1498,9 @@ class KuwoPlugin(Star):
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ======================================================================
-    # 高精度调度器（纯净版，完全由任务自身控制去重）
+    # 高精度调度器（低CPU，30秒扫描间隔）
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
-        """
-        计算自 from_dt 开始的第一个匹配 Cron 表达式的时间点（精确到秒）
-        若当前时间匹配，则直接返回当前时间。
-        """
         cron_dict = self._parse_cron(cron_expr)
         dt = from_dt
         limit = from_dt + timedelta(days=365)
@@ -1516,7 +1511,7 @@ class KuwoPlugin(Star):
         return None
 
     async def _scheduler_loop(self):
-        logger.info("🕐 高精度定时调度器已启动（低CPU模式）")
+        logger.info("🕐 高精度定时调度器已启动（低CPU模式，扫描间隔30秒）")
         while self.scheduler_running:
             try:
                 now = datetime.now()
@@ -1536,10 +1531,9 @@ class KuwoPlugin(Star):
                             events.append((nt, user_id, 'withdraw'))
 
                 if not events:
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(30)  # 无任务时30秒扫描一次
                     continue
 
-                # 去重：同一用户同一类型只保留最早的一个
                 unique = {}
                 for nt, uid, typ in events:
                     key = (uid, typ)
@@ -1548,7 +1542,6 @@ class KuwoPlugin(Star):
                 events = list(unique.values())
                 events.sort(key=lambda x: x[0])
 
-                # 检查是否有已到期任务
                 expired = [e for e in events if e[0] <= now]
                 if expired:
                     for nt, uid, typ in expired:
@@ -1559,12 +1552,11 @@ class KuwoPlugin(Star):
                             asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
                     continue
 
-                # 无到期任务，计算距离下一个事件的时间
                 next_time = events[0][0]
                 delay = (next_time - now).total_seconds()
                 if delay > 0:
-                    if delay > 60:
-                        await asyncio.sleep(60)
+                    if delay > 30:
+                        await asyncio.sleep(30)
                     else:
                         await asyncio.sleep(delay)
                         now = datetime.now()
@@ -2380,7 +2372,6 @@ class KuwoPlugin(Star):
     # ---------- 生命周期 ----------
     async def initialize(self):
         logger.info("🚀 酷我插件正在初始化...")
-        # 自动迁移：为所有用户更新提现Cron（若为旧值则替换）
         all_data = await self._load_all_data()
         updated = False
         new_cron = "0 0 0,9,13,17,20 * * *"
@@ -2391,14 +2382,13 @@ class KuwoPlugin(Star):
                 wjob["cron"] = new_cron
                 updated = True
                 logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_cron}")
-            # 注意：不修改 scheduled_job 的任何值，保留用户原有设置
         if updated:
             await self._save_all_data(all_data)
             logger.info("✅ 所有用户的提现Cron已迁移完成")
 
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
-        logger.info("✅ 高精度定时调度器已启动（低CPU模式）")
+        logger.info("✅ 高精度定时调度器已启动（扫描间隔30秒）")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
