@@ -19,7 +19,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 # ======================================================================
-# 1. 加密常量（完整，不变）
+# 1. 加密常量（完整）
 # ======================================================================
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（最终版：示例已修改为15 55...）
+# 3. AstrBot 插件主类（最终版）
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -393,7 +393,7 @@ class KuwoPlugin(Star):
 
         self.num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
-        # 记录上次触发的时间（用于秒级去重）
+        # 记录上次触发的时间（用于秒级去重，仅由任务函数管理）
         self._last_trigger_time = {}
 
     # ---------- 数据持久化 ----------
@@ -1499,7 +1499,7 @@ class KuwoPlugin(Star):
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ======================================================================
-    # 高精度调度器（低CPU占用版 + 秒级去重）
+    # 高精度调度器（纯净版，完全由任务自身控制去重）
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
         """
@@ -1516,7 +1516,7 @@ class KuwoPlugin(Star):
         return None
 
     async def _scheduler_loop(self):
-        logger.info("🕐 高精度定时调度器已启动（低CPU模式，秒级去重）")
+        logger.info("🕐 高精度定时调度器已启动（低CPU模式）")
         while self.scheduler_running:
             try:
                 now = datetime.now()
@@ -1552,12 +1552,6 @@ class KuwoPlugin(Star):
                 expired = [e for e in events if e[0] <= now]
                 if expired:
                     for nt, uid, typ in expired:
-                        lock_key = f"{uid}_{typ}"
-                        last = self._last_trigger_time.get(lock_key)
-                        if last and last.year == now.year and last.month == now.month and last.day == now.day and last.hour == now.hour and last.minute == now.minute and last.second == now.second:
-                            logger.info(f"⏳ 任务 {lock_key} 已在当前秒内触发，跳过")
-                            continue
-                        self._last_trigger_time[lock_key] = now
                         logger.info(f"⏰ 触发定时任务: 用户 {uid}, 类型 {typ}, 原定 {nt.strftime('%H:%M:%S.%f')}")
                         if typ == 'code':
                             asyncio.create_task(self._execute_scheduled_job(uid))
@@ -1576,12 +1570,6 @@ class KuwoPlugin(Star):
                         now = datetime.now()
                         for nt, uid, typ in events:
                             if abs((nt - now).total_seconds()) < 0.1:
-                                lock_key = f"{uid}_{typ}"
-                                last = self._last_trigger_time.get(lock_key)
-                                if last and last.year == now.year and last.month == now.month and last.day == now.day and last.hour == now.hour and last.minute == now.minute and last.second == now.second:
-                                    logger.info(f"⏳ 任务 {lock_key} 已在当前秒内触发，跳过")
-                                    continue
-                                self._last_trigger_time[lock_key] = now
                                 logger.info(f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 实际 {now.strftime('%H:%M:%S.%f')}")
                                 if typ == 'code':
                                     asyncio.create_task(self._execute_scheduled_job(uid))
@@ -1590,14 +1578,10 @@ class KuwoPlugin(Star):
                 else:
                     logger.warning(f"⚠️ 事件已过期，立即触发: {events[0][0].strftime('%H:%M:%S.%f')}")
                     uid, typ = events[0][1], events[0][2]
-                    lock_key = f"{uid}_{typ}"
-                    last = self._last_trigger_time.get(lock_key)
-                    if not (last and last.year == now.year and last.month == now.month and last.day == now.day and last.hour == now.hour and last.minute == now.minute and last.second == now.second):
-                        self._last_trigger_time[lock_key] = now
-                        if typ == 'code':
-                            asyncio.create_task(self._execute_scheduled_job(uid))
-                        else:
-                            asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
+                    if typ == 'code':
+                        asyncio.create_task(self._execute_scheduled_job(uid))
+                    else:
+                        asyncio.create_task(self._execute_withdraw_scheduled_job(uid))
 
                 await asyncio.sleep(0.01)
 
