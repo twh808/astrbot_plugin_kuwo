@@ -394,98 +394,166 @@ class KuwoPlugin(Star):
         self.num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
         self._last_trigger_time = {}
+        # 【新增】数据库写入锁，保证插件内部读写原子性
+        self._db_lock = asyncio.Lock()
+        # 【新增】验证码内存缓存：{user_id: {phone: {"code": str, "expire": float}}}
+        self._code_cache_mem = {}
 
     # ---------- 数据持久化 ----------
+    async def _retry_db_call(self, coro_func, *args, max_retries=5, base_delay=0.5, **kwargs):
+        """数据库操作重试包装器，处理 SQLite 'database is locked' 错误"""
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                return await coro_func(*args, **kwargs)
+            except Exception as e:
+                last_exc = e
+                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                    wait = base_delay * (attempt + 1)
+                    logger.warning(f"⚠️ 数据库锁定，{wait:.1f}秒后重试（{attempt+1}/{max_retries}）")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+
+    async def _load_all_data_unlocked(self) -> dict:
+        """读取全部数据（无锁，仅供已持锁的调用者使用）"""
+        return await self._retry_db_call(self.get_kv_data, "kuwo_data", {})
+
+    async def _save_all_data_unlocked(self, data: dict):
+        """写入全部数据（无锁，仅供已持锁的调用者使用）"""
+        await self._retry_db_call(self.put_kv_data, "kuwo_data", data)
+
     async def _load_all_data(self) -> dict:
-        return await self.get_kv_data("kuwo_data", {})
+        """读取全部数据（带锁，公开接口）"""
+        async with self._db_lock:
+            return await self._load_all_data_unlocked()
 
     async def _save_all_data(self, data: dict):
-        await self.put_kv_data("kuwo_data", data)
+        """写入全部数据（带锁，公开接口）"""
+        async with self._db_lock:
+            await self._save_all_data_unlocked(data)
 
-    async def _load_data(self, user_id: str) -> dict:
-        all_data = await self._load_all_data()
-        if user_id not in all_data:
-            all_data[user_id] = {
-                "accounts": [],
-                "auth_limit": self.default_auth_limit,
-                "daily_withdraw": {},
-                "verification_codes": {},
-                "cron": self.verification_cron,
-                "scheduled_job": {
-                    "cron": self.verification_cron,
-                    "enabled": True,
-                    "last_executed": None
-                },
-                "withdraw_scheduled_job": {
-                    "cron": self.default_withdraw_cron,
-                    "enabled": True,
-                    "last_executed": None
-                },
-                "last_withdraw_log": None
-            }
-        else:
-            user_data = all_data[user_id]
-            if "accounts" in user_data and len(user_data["accounts"]) > 1:
-                unique_dict = {}
-                for acc in user_data["accounts"]:
-                    phone = acc.get("phone")
-                    if phone:
-                        unique_dict[phone] = acc
-                new_accounts = list(unique_dict.values())
-                if len(new_accounts) < len(user_data["accounts"]):
-                    logger.info(f"🔄 用户 {user_id} 的账号列表存在重复，已去重（原 {len(user_data['accounts'])} 个，去重后 {len(new_accounts)} 个）")
-                    user_data["accounts"] = new_accounts
+    def _migrate_user_data(self, user_data: dict) -> bool:
+        """迁移/补全用户数据结构；返回 True 表示发生了修改需要保存"""
+        changed = False
 
-            if "scheduled_job" not in user_data:
-                user_data["scheduled_job"] = {
-                    "cron": self.verification_cron,
-                    "enabled": True,
-                    "last_executed": None
-                }
-            else:
-                if "cron" not in user_data["scheduled_job"]:
-                    user_data["scheduled_job"]["cron"] = self.verification_cron
-                if "enabled" not in user_data["scheduled_job"]:
-                    user_data["scheduled_job"]["enabled"] = True
-                if "last_executed" not in user_data["scheduled_job"]:
-                    user_data["scheduled_job"]["last_executed"] = None
-
-            if "withdraw_scheduled_job" not in user_data:
-                user_data["withdraw_scheduled_job"] = {
-                    "cron": self.default_withdraw_cron,
-                    "enabled": True,
-                    "last_executed": None
-                }
-            else:
-                if "enabled" not in user_data["withdraw_scheduled_job"]:
-                    user_data["withdraw_scheduled_job"]["enabled"] = True
-                if not user_data["withdraw_scheduled_job"].get("cron"):
-                    user_data["withdraw_scheduled_job"]["cron"] = self.default_withdraw_cron
-            if "last_withdraw_log" not in user_data:
-                user_data["last_withdraw_log"] = None
-
-        await self._save_all_data(all_data)
-        return all_data[user_id]
-
-    async def _save_data(self, user_id: str, user_data: dict):
-        if "accounts" in user_data:
+        # 账号去重
+        if "accounts" in user_data and len(user_data["accounts"]) > 1:
             unique_dict = {}
             for acc in user_data["accounts"]:
                 phone = acc.get("phone")
                 if phone:
                     unique_dict[phone] = acc
-            user_data["accounts"] = list(unique_dict.values())
-        all_data = await self._load_all_data()
-        all_data[user_id] = user_data
-        await self._save_all_data(all_data)
+            new_accounts = list(unique_dict.values())
+            if len(new_accounts) < len(user_data["accounts"]):
+                logger.info(f"🔄 账号列表存在重复，已去重（原 {len(user_data['accounts'])} 个，去重后 {len(new_accounts)} 个）")
+                user_data["accounts"] = new_accounts
+                changed = True
+
+        # scheduled_job
+        if "scheduled_job" not in user_data:
+            user_data["scheduled_job"] = {
+                "cron": self.verification_cron,
+                "enabled": True,
+                "last_executed": None
+            }
+            changed = True
+        else:
+            sj = user_data["scheduled_job"]
+            if "cron" not in sj:
+                sj["cron"] = self.verification_cron
+                changed = True
+            if "enabled" not in sj:
+                sj["enabled"] = True
+                changed = True
+            if "last_executed" not in sj:
+                sj["last_executed"] = None
+                changed = True
+
+        # withdraw_scheduled_job
+        if "withdraw_scheduled_job" not in user_data:
+            user_data["withdraw_scheduled_job"] = {
+                "cron": self.default_withdraw_cron,
+                "enabled": True,
+                "last_executed": None
+            }
+            changed = True
+        else:
+            wj = user_data["withdraw_scheduled_job"]
+            if "enabled" not in wj:
+                wj["enabled"] = True
+                changed = True
+            if not wj.get("cron"):
+                wj["cron"] = self.default_withdraw_cron
+                changed = True
+
+        if "last_withdraw_log" not in user_data:
+            user_data["last_withdraw_log"] = None
+            changed = True
+
+        return changed
+
+    async def _load_data(self, user_id: str) -> dict:
+        """读取单个用户数据；仅在初始化/迁移时才写回数据库"""
+        async with self._db_lock:
+            all_data = await self._load_all_data_unlocked()
+            need_save = False
+
+            if user_id not in all_data:
+                all_data[user_id] = {
+                    "accounts": [],
+                    "auth_limit": self.default_auth_limit,
+                    "daily_withdraw": {},
+                    "verification_codes": {},
+                    "cron": self.verification_cron,
+                    "scheduled_job": {
+                        "cron": self.verification_cron,
+                        "enabled": True,
+                        "last_executed": None
+                    },
+                    "withdraw_scheduled_job": {
+                        "cron": self.default_withdraw_cron,
+                        "enabled": True,
+                        "last_executed": None
+                    },
+                    "last_withdraw_log": None
+                }
+                need_save = True
+            else:
+                if self._migrate_user_data(all_data[user_id]):
+                    need_save = True
+
+            if need_save:
+                await self._save_all_data_unlocked(all_data)
+
+            return all_data[user_id]
+
+    async def _save_data(self, user_id: str, user_data: dict):
+        """保存单个用户数据"""
+        async with self._db_lock:
+            # 账号去重
+            if "accounts" in user_data:
+                unique_dict = {}
+                for acc in user_data["accounts"]:
+                    phone = acc.get("phone")
+                    if phone:
+                        unique_dict[phone] = acc
+                user_data["accounts"] = list(unique_dict.values())
+
+            all_data = await self._load_all_data_unlocked()
+            all_data[user_id] = user_data
+            await self._save_all_data_unlocked(all_data)
 
     async def _delete_user_data(self, user_id: str) -> bool:
-        all_data = await self._load_all_data()
-        if user_id in all_data:
-            del all_data[user_id]
-            await self._save_all_data(all_data)
-            return True
-        return False
+        async with self._db_lock:
+            all_data = await self._load_all_data_unlocked()
+            if user_id in all_data:
+                del all_data[user_id]
+                await self._save_all_data_unlocked(all_data)
+                return True
+            return False
 
     # ---------- 状态管理 ----------
     def _get_state(self, user_id: str) -> dict:
@@ -875,7 +943,7 @@ class KuwoPlugin(Star):
             return
 
         text = event.message_str.strip()
-        # 【修复】q/Q 交给 handle_global_q 统一处理，避免报错+取消+菜单三条消息
+        # 【修复】q/Q 交给 handle_global_q 统一处理
         if text in ("q", "Q"):
             return
         if text == "0":
@@ -1076,7 +1144,8 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
-    # 【修复】q/Q 直接 return 交给 handle_global_q 统一处理
+    # 【优化】验证码写入内存缓存，避免触发数据库写入
+    # 【修复】q/Q 由 handle_global_q 统一处理
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
         if getattr(event, '_code_phone_processed', False):
@@ -1086,14 +1155,14 @@ class KuwoPlugin(Star):
         if state.get('step') != 'waiting_code_input':
             return
         text = event.message_str.strip()
-        # 【修复】只处理 0，返回主菜单
+        # 【修复】0 返回主菜单
         if text == "0":
             self._update_state(user_id, menu='main', step=None)
             main_menu = await self._get_main_menu_text(user_id)
             self._schedule_timeout(user_id)
             yield event.plain_result(main_menu)
             return
-        # 【修复】q/Q 由 handle_global_q 统一处理，避免主菜单重复发送
+        # 【修复】q/Q 交给 handle_global_q
         if text in ("q", "Q"):
             return
         self._cancel_timeout(user_id)
@@ -1112,9 +1181,10 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(main_menu)
             return
-        user_data = await self._load_data(user_id)
-        user_data["verification_codes"][phone] = {"code": code, "expire": time.time() + 300}
-        await self._save_data(user_id, user_data)
+        # 【优化】验证码写入内存缓存，不再触发数据库写入
+        if user_id not in self._code_cache_mem:
+            self._code_cache_mem[user_id] = {}
+        self._code_cache_mem[user_id][phone] = {"code": code, "expire": time.time() + 300}
         self._schedule_timeout(user_id)
         yield event.plain_result(f"✅ 验证码 {code} 已缓存（5分钟有效）")
         self._update_state(user_id, menu='main', step=None)
@@ -1296,7 +1366,10 @@ class KuwoPlugin(Star):
         if not accounts:
             return "❌ 没有可用的账号"
 
-        codes = user_data.get("verification_codes", {})
+        # 【优化】优先使用内存缓存，兼容数据库旧数据
+        codes = dict(user_data.get("verification_codes", {}))
+        mem_codes = self._code_cache_mem.get(user_id, {})
+        codes.update(mem_codes)
         valid_accounts = []
         for acc in accounts:
             phone = acc["phone"]
@@ -1354,8 +1427,12 @@ class KuwoPlugin(Star):
                 user_data["auth_limit"] = 0
 
         for phone in [r[0] for r in results if r[3]]:
-            if phone in user_data["verification_codes"]:
+            # 【优化】清理数据库缓存
+            if phone in user_data.get("verification_codes", {}):
                 del user_data["verification_codes"][phone]
+            # 【优化】清理内存缓存
+            if user_id in self._code_cache_mem and phone in self._code_cache_mem[user_id]:
+                del self._code_cache_mem[user_id][phone]
 
         today = datetime.now().strftime("%Y-%m-%d")
         if today not in user_data["daily_withdraw"]:
@@ -1545,12 +1622,11 @@ class KuwoPlugin(Star):
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ======================================================================
-    # 高精度调度器（修复验证码重复发送）
+    # 高精度调度器
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
         """计算自 from_dt 之后的第一个匹配时间点（返回整秒，严格大于 from_dt）"""
         cron_dict = self._parse_cron(cron_expr)
-        # 从下一秒的整秒开始，避免返回当前时刻（已过去），确保不重复触发
         dt = (from_dt + timedelta(seconds=1)).replace(microsecond=0)
         limit = from_dt + timedelta(days=365)
         while dt <= limit:
@@ -1583,7 +1659,6 @@ class KuwoPlugin(Star):
                     await asyncio.sleep(30)
                     continue
 
-                # 去重：同一用户同一类型只保留最早的一个
                 unique = {}
                 for nt, uid, typ, udata in events:
                     key = (uid, typ)
@@ -1592,7 +1667,6 @@ class KuwoPlugin(Star):
                 events = list(unique.values())
                 events.sort(key=lambda x: x[0])
 
-                # 处理已到期任务（只处理最近 30 秒内的，避免陈旧事件堆积）
                 expired = [e for e in events if e[0] <= now and (now - e[0]).total_seconds() <= 30]
                 if expired:
                     for nt, uid, typ, udata in expired:
@@ -1610,7 +1684,6 @@ class KuwoPlugin(Star):
                     await asyncio.sleep(30)
                     continue
 
-                # 30秒内：一次性精确休眠到触发时刻
                 if delay > 0:
                     await asyncio.sleep(delay)
 
@@ -2196,7 +2269,7 @@ class KuwoPlugin(Star):
             return
 
         text = event.message_str.strip().lower()
-        # 【修复】只处理 0，q/Q 交给 handle_global_q 统一取消
+        # 【修复】只处理 0，q/Q 交给 handle_global_q
         if text == "0":
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
