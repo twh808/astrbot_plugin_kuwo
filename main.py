@@ -19,7 +19,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 # ======================================================================
-# 1. 加密常量（完整，不变）
+# 1. 加密常量（完整）
 # ======================================================================
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
@@ -366,7 +366,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     return log_lines, last_combined if last_combined else "未知错误", False
 
 # ======================================================================
-# 3. AstrBot 插件主类（毫秒级调度版）
+# 3. AstrBot 插件主类
 # ======================================================================
 class KuwoPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -579,7 +579,7 @@ class KuwoPlugin(Star):
         user_data = await self._load_data(user_id)
         job = user_data.get('scheduled_job', {})
         has_rule = bool(job.get('cron')) and job.get('enabled', False)
-        
+
         if has_rule:
             cron = job.get('cron')
             return (
@@ -1377,7 +1377,7 @@ class KuwoPlugin(Star):
         main_menu = await self._get_main_menu_text(user_id)
         return result + "\n" + main_menu
 
-    # ---------- 提现任务执行（毫秒级触发） ----------
+    # ---------- 提现任务执行 ----------
     async def _execute_withdraw_scheduled_job(self, user_id: str, preloaded_data: dict = None):
         lock_key = f"{user_id}_withdraw"
         now = datetime.now()
@@ -1389,7 +1389,6 @@ class KuwoPlugin(Star):
 
         try:
             logger.info(f"💳 开始执行提现定时任务，用户 {user_id}")
-            # ====== 使用预加载数据，避免再次 KV 读取 ======
             if preloaded_data is not None:
                 user_data = preloaded_data
             else:
@@ -1443,7 +1442,7 @@ class KuwoPlugin(Star):
         self._update_state(user_id, step='waiting_send_select', tmp_data={'accounts': accounts})
         return prompt
 
-    # ---------- 验证码任务执行（毫秒级触发） ----------
+    # ---------- 验证码任务执行 ----------
     async def _execute_scheduled_job(self, user_id: str, is_manual: bool = False, preloaded_data: dict = None):
         lock_key = f"{user_id}_code"
         if not is_manual:
@@ -1456,7 +1455,6 @@ class KuwoPlugin(Star):
 
         try:
             logger.info(f"🔔 执行验证码定时任务，用户 {user_id}，手动={is_manual}")
-            # ====== 使用预加载数据，避免再次 KV 读取 ======
             if preloaded_data is not None:
                 user_data = preloaded_data
             else:
@@ -1536,11 +1534,13 @@ class KuwoPlugin(Star):
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ======================================================================
-    # 高精度调度器（毫秒级精准触发 + 预加载数据）
+    # 高精度调度器（修复验证码重复发送）
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
+        """计算自 from_dt 之后的第一个匹配时间点（返回整秒，严格大于 from_dt）"""
         cron_dict = self._parse_cron(cron_expr)
-        dt = from_dt
+        # 从下一秒的整秒开始，避免返回当前时刻（已过去），确保不重复触发
+        dt = (from_dt + timedelta(seconds=1)).replace(microsecond=0)
         limit = from_dt + timedelta(days=365)
         while dt <= limit:
             if self._match_cron(cron_dict, dt):
@@ -1581,8 +1581,8 @@ class KuwoPlugin(Star):
                 events = list(unique.values())
                 events.sort(key=lambda x: x[0])
 
-                # 处理已到期任务
-                expired = [e for e in events if e[0] <= now]
+                # 处理已到期任务（只处理最近 30 秒内的，避免陈旧事件堆积）
+                expired = [e for e in events if e[0] <= now and (now - e[0]).total_seconds() <= 30]
                 if expired:
                     for nt, uid, typ, udata in expired:
                         logger.info(f"⏰ 触发已到期任务: 用户 {uid}, 类型 {typ}, 原定 {nt.strftime('%H:%M:%S.%f')}")
@@ -1595,20 +1595,17 @@ class KuwoPlugin(Star):
                 next_time = events[0][0]
                 delay = (next_time - now).total_seconds()
 
-                # 远距离分块（保证新规则能在30秒内被感知）
                 if delay > 30:
                     await asyncio.sleep(30)
                     continue
 
-                # 30秒内：一次性精确休眠到触发时刻，误差仅 asyncio 事件循环粒度（约 1~3ms）
+                # 30秒内：一次性精确休眠到触发时刻
                 if delay > 0:
                     await asyncio.sleep(delay)
 
-                # 醒来后立即批量触发所有到达时刻的任务
                 now2 = datetime.now()
                 fired = []
                 for nt, uid, typ, udata in events:
-                    # 容忍 5ms 提前触发，确保不漏
                     if (now2 - nt).total_seconds() >= -0.005:
                         fired.append((nt, uid, typ, udata))
 
@@ -1620,7 +1617,6 @@ class KuwoPlugin(Star):
                     elif typ == 'withdraw':
                         asyncio.create_task(self._execute_withdraw_scheduled_job(uid, preloaded_data=udata))
 
-                # 让出控制权，让新创建的任务尽快开始 HTTP 请求
                 await asyncio.sleep(0)
 
             except Exception as e:
@@ -2439,7 +2435,7 @@ class KuwoPlugin(Star):
 
         self.scheduler_running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
-        logger.info("✅ 毫秒级定时调度器已启动")
+        logger.info("✅ 高精度定时调度器已启动")
 
     async def terminate(self):
         logger.info("✅ 酷我插件已卸载")
