@@ -875,6 +875,9 @@ class KuwoPlugin(Star):
             return
 
         text = event.message_str.strip()
+        # 【修复】q/Q 交给 handle_global_q 统一处理，避免报错+取消+菜单三条消息
+        if text in ("q", "Q"):
+            return
         if text == "0":
             self._update_state(user_id, menu='verify_timer', step=None)
             self._schedule_timeout(user_id)
@@ -955,7 +958,8 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._withdraw_menu())
 
     # ---------- 普通用户辅助 ----------
-    @filter.regex(r'^(all|[\d,]+|0|q|Q)$')
+    # 【修复】从正则中移除 q|Q，避免与 handle_global_q 双重处理
+    @filter.regex(r'^(all|[\d,]+|0)$')
     async def handle_send_select(self, event: AstrMessageEvent):
         if getattr(event, '_verify_choice_processed', False):
             return
@@ -964,7 +968,8 @@ class KuwoPlugin(Star):
         if state.get('step') != 'waiting_send_select':
             return
         text = event.message_str.strip().lower()
-        if text in ("0", "q"):
+        # 【修复】只处理 0，q/Q 交给 handle_global_q 统一取消
+        if text == "0":
             self._update_state(user_id, menu='verify', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._verify_menu())
@@ -1071,6 +1076,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
+    # 【修复】q/Q 直接 return 交给 handle_global_q 统一处理
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
         if getattr(event, '_code_phone_processed', False):
@@ -1080,11 +1086,15 @@ class KuwoPlugin(Star):
         if state.get('step') != 'waiting_code_input':
             return
         text = event.message_str.strip()
-        if text in ("0", "q", "Q"):
+        # 【修复】只处理 0，返回主菜单
+        if text == "0":
             self._update_state(user_id, menu='main', step=None)
             main_menu = await self._get_main_menu_text(user_id)
             self._schedule_timeout(user_id)
             yield event.plain_result(main_menu)
+            return
+        # 【修复】q/Q 由 handle_global_q 统一处理，避免主菜单重复发送
+        if text in ("q", "Q"):
             return
         self._cancel_timeout(user_id)
         self._schedule_timeout(user_id)
@@ -1250,6 +1260,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(main_menu)
 
+    # 【保留】全局 q/Q 处理器：唯一负责取消的处理器
     @filter.regex(r'^[qQ]$')
     async def handle_global_q(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
@@ -2174,7 +2185,8 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(prompt)
 
-    @filter.regex(r'^(all|[\d,]+|0|q|Q)$')
+    # 【修复】从正则中移除 q|Q，避免与 handle_global_q 双重处理
+    @filter.regex(r'^(all|[\d,]+|0)$')
     async def handle_admin_send_code_select_account(self, event: AstrMessageEvent):
         if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
             return
@@ -2184,7 +2196,8 @@ class KuwoPlugin(Star):
             return
 
         text = event.message_str.strip().lower()
-        if text in ("0", "q"):
+        # 【修复】只处理 0，q/Q 交给 handle_global_q 统一取消
+        if text == "0":
             self._update_state(user_id, menu='admin', step=None)
             self._schedule_timeout(user_id)
             yield event.plain_result(self._admin_menu())
