@@ -398,6 +398,8 @@ class KuwoPlugin(Star):
         self._db_lock = asyncio.Lock()
         # 【新增】验证码内存缓存：{user_id: {phone: {"code": str, "expire": float}}}
         self._code_cache_mem = {}
+        # 【新增】预登录缓存：{user_id: {phone: {"uid": str, "sid": str, "appuid": str, "expire": float}}}
+        self._login_cache_mem = {}
 
     # ---------- 数据持久化 ----------
     async def _retry_db_call(self, coro_func, *args, max_retries=5, base_delay=0.5, **kwargs):
@@ -1092,7 +1094,7 @@ class KuwoPlugin(Star):
             if not password:
                 results.append(f"❌ {phone}: 未找到密码")
                 continue
-            login = login_kuwo(phone, password)
+            login = await asyncio.to_thread(login_kuwo, phone, password)
             if not login:
                 results.append(f"❌ {phone}: 登录失败")
                 continue
@@ -1144,7 +1146,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
-    # 【优化】验证码写入内存缓存，避免触发数据库写入
+    # 【优化】验证码写入内存缓存 + 后台预登录
     # 【修复】q/Q 由 handle_global_q 统一处理
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
@@ -1185,6 +1187,8 @@ class KuwoPlugin(Star):
         if user_id not in self._code_cache_mem:
             self._code_cache_mem[user_id] = {}
         self._code_cache_mem[user_id][phone] = {"code": code, "expire": time.time() + 300}
+        # 【优化】后台预登录，缓存 uid/sid/appuid，提现时直接使用，省下 1-3 秒
+        asyncio.create_task(self._pre_login(user_id, phone))
         self._schedule_timeout(user_id)
         yield event.plain_result(f"✅ 验证码 {code} 已缓存（5分钟有效）")
         self._update_state(user_id, menu='main', step=None)
@@ -1346,6 +1350,42 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出")
 
+    # ---------- 预登录（提现提速关键） ----------
+    async def _pre_login(self, user_id: str, phone: str):
+        """
+        用户提交验证码后，后台预登录并缓存 uid/sid/appuid。
+        提现时直接使用缓存，省去实时登录的 1-3 秒开销。
+        """
+        try:
+            user_data = await self._load_data(user_id)
+            password = None
+            for acc in user_data.get("accounts", []):
+                if acc.get("phone") == phone:
+                    password = acc.get("password")
+                    break
+            if not password:
+                logger.warning(f"预登录跳过：{phone} 无密码")
+                return
+
+            logger.info(f"🔄 开始预登录 {phone} ...")
+            login_result = await asyncio.to_thread(login_kuwo, phone, password)
+            if not login_result:
+                logger.warning(f"⚠️ 预登录失败: {phone}")
+                return
+
+            uid, sid, appuid, _ = login_result
+            if user_id not in self._login_cache_mem:
+                self._login_cache_mem[user_id] = {}
+            self._login_cache_mem[user_id][phone] = {
+                "uid": uid,
+                "sid": sid,
+                "appuid": appuid,
+                "expire": time.time() + 600,  # 10 分钟有效
+            }
+            logger.info(f"✅ 预登录成功并缓存: {phone}")
+        except Exception as e:
+            logger.error(f"预登录异常: {e}")
+
     # ---------- 核心提现逻辑 ----------
     async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None) -> str:
         user_data = await self._load_data(user_id)
@@ -1387,13 +1427,21 @@ class KuwoPlugin(Star):
             if not code_info:
                 return (phone, None, "跳过（无验证码）", False)
 
-            login_result = login_kuwo(phone, password)
-            if not login_result:
-                return (phone, None, "登录失败", False)
-            uid, sid, appuid, _ = login_result
+            # 【优化】优先使用预登录缓存，命中则跳过实时登录
+            cached = self._login_cache_mem.get(user_id, {}).get(phone)
+            if cached and time.time() <= cached.get("expire", 0):
+                uid = cached["uid"]
+                sid = cached["sid"]
+                appuid = cached["appuid"]
+                logger.info(f"⚡ {phone} 命中预登录缓存，直接提现")
+            else:
+                # 缓存未命中：用 to_thread 避免阻塞事件循环，保证多账户真并发
+                login_result = await asyncio.to_thread(login_kuwo, phone, password)
+                if not login_result:
+                    return (phone, None, "登录失败", False)
+                uid, sid, appuid, _ = login_result
 
-            if check_withdraw_today(uid, sid):
-                return (phone, None, "今日已提现，跳过", False)
+            # 【优化】跳过 check_withdraw_today，提现接口自身会校验
 
             encrypted_phone = encrypt_phone(phone)
             code = code_info["code"]
@@ -1427,12 +1475,15 @@ class KuwoPlugin(Star):
                 user_data["auth_limit"] = 0
 
         for phone in [r[0] for r in results if r[3]]:
-            # 【优化】清理数据库缓存
+            # 清理数据库缓存
             if phone in user_data.get("verification_codes", {}):
                 del user_data["verification_codes"][phone]
-            # 【优化】清理内存缓存
+            # 清理验证码内存缓存
             if user_id in self._code_cache_mem and phone in self._code_cache_mem[user_id]:
                 del self._code_cache_mem[user_id][phone]
+            # 【优化】清理预登录缓存
+            if user_id in self._login_cache_mem and phone in self._login_cache_mem[user_id]:
+                del self._login_cache_mem[user_id][phone]
 
         today = datetime.now().strftime("%Y-%m-%d")
         if today not in user_data["daily_withdraw"]:
@@ -1586,7 +1637,7 @@ class KuwoPlugin(Star):
             for acc in unique_accounts:
                 phone = acc['phone']
                 password = acc['password']
-                login = login_kuwo(phone, password)
+                login = await asyncio.to_thread(login_kuwo, phone, password)
                 if not login:
                     results.append(f"❌ {phone}: 登录失败")
                     continue
@@ -2183,7 +2234,7 @@ class KuwoPlugin(Star):
             async def send_for_all(phone_info):
                 phone = phone_info["phone"]
                 password = phone_info["password"]
-                login = login_kuwo(phone, password)
+                login = await asyncio.to_thread(login_kuwo, phone, password)
                 if not login:
                     return (phone, "登录失败", False)
                 uid_kuwo, sid, appuid, _ = login
@@ -2324,7 +2375,7 @@ class KuwoPlugin(Star):
             if not password:
                 results.append(f"❌ {phone}: 未找到密码")
                 continue
-            login = login_kuwo(phone, password)
+            login = await asyncio.to_thread(login_kuwo, phone, password)
             if not login:
                 results.append(f"❌ {phone}: 登录失败")
                 continue
