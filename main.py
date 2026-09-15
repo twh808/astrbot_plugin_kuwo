@@ -8,6 +8,7 @@ import random
 import string
 import uuid
 import hashlib
+import email.utils
 from datetime import datetime, timedelta
 import requests
 from Crypto.Cipher import AES
@@ -400,6 +401,9 @@ class KuwoPlugin(Star):
         self._code_cache_mem = {}
         # 【新增】预登录缓存：{user_id: {phone: {"uid": str, "sid": str, "appuid": str, "expire": float}}}
         self._login_cache_mem = {}
+        # 【新增】时钟偏移缓存：标准时间 = 本地时间 + _time_offset
+        self._time_offset = 0.0
+        self._time_offset_updated_at = 0.0
 
     # ---------- 数据持久化 ----------
     async def _retry_db_call(self, coro_func, *args, max_retries=5, base_delay=0.5, **kwargs):
@@ -1094,6 +1098,7 @@ class KuwoPlugin(Star):
             if not password:
                 results.append(f"❌ {phone}: 未找到密码")
                 continue
+            # 【优化】to_thread 避免阻塞事件循环，多账户真并发
             login = await asyncio.to_thread(login_kuwo, phone, password)
             if not login:
                 results.append(f"❌ {phone}: 登录失败")
@@ -1187,7 +1192,7 @@ class KuwoPlugin(Star):
         if user_id not in self._code_cache_mem:
             self._code_cache_mem[user_id] = {}
         self._code_cache_mem[user_id][phone] = {"code": code, "expire": time.time() + 300}
-        # 【优化】后台预登录，缓存 uid/sid/appuid，提现时直接使用，省下 1-3 秒
+        # 【优化】后台预登录，缓存 uid/sid/appuid，提现时直接使用
         asyncio.create_task(self._pre_login(user_id, phone))
         self._schedule_timeout(user_id)
         yield event.plain_result(f"✅ 验证码 {code} 已缓存（5分钟有效）")
@@ -1637,6 +1642,7 @@ class KuwoPlugin(Star):
             for acc in unique_accounts:
                 phone = acc['phone']
                 password = acc['password']
+                # 【优化】to_thread 避免阻塞事件循环
                 login = await asyncio.to_thread(login_kuwo, phone, password)
                 if not login:
                     results.append(f"❌ {phone}: 登录失败")
@@ -1673,6 +1679,64 @@ class KuwoPlugin(Star):
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ======================================================================
+    # 时间校准（提现准点关键）
+    # ======================================================================
+    async def _calibrate_time(self, samples=3):
+        """
+        通过多个 HTTP 时间源校准本地时钟。
+        返回本地时间需要修正的偏移量（秒）：标准时间 = 本地时间 + offset
+        使用 HTTP Date 响应头，多源取中位数抗抖动。
+        """
+        sources = [
+            "https://www.baidu.com",
+            "https://www.qq.com",
+            "https://www.taobao.com",
+            "https://www.jd.com",
+        ][:samples]
+        offsets = []
+
+        for url in sources:
+            try:
+                t0 = time.time()
+                resp = await asyncio.to_thread(
+                    requests.head, url, timeout=3, allow_redirects=False
+                )
+                t1 = time.time()
+                date_header = resp.headers.get('Date')
+                if not date_header:
+                    continue
+                server_dt = email.utils.parsedate_to_datetime(date_header)
+                if server_dt is None:
+                    continue
+                server_ts = server_dt.timestamp()
+                rtt = t1 - t0
+                # 假设网络往返对称：服务器时间 server_ts 对应本地的 t0 + rtt/2
+                # 本地在 t1 时，标准时间应为 server_ts + rtt/2
+                # offset = 标准时间 - 本地时间
+                offset = (server_ts + rtt / 2) - t1
+                offsets.append(offset)
+            except Exception as e:
+                logger.debug(f"时间源 {url} 校准失败: {e}")
+                continue
+
+        if not offsets:
+            logger.warning("⚠️ 时间校准失败：所有时间源均不可用，使用本地时间")
+            return 0.0
+
+        offsets.sort()
+        median = offsets[len(offsets) // 2]
+        spread = offsets[-1] - offsets[0] if len(offsets) > 1 else 0.0
+        logger.info(
+            f"⏱️ 时间校准完成：偏移 {median*1000:+.0f}ms "
+            f"(源数 {len(offsets)}, 极差 {spread*1000:.0f}ms)"
+        )
+        return median
+
+    def _get_calibrated_now_ts(self) -> float:
+        """返回校准后的当前标准时间戳（秒）"""
+        return time.time() + self._time_offset
+
+    # ======================================================================
     # 高精度调度器
     # ======================================================================
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
@@ -1687,7 +1751,7 @@ class KuwoPlugin(Star):
         return None
 
     async def _scheduler_loop(self):
-        logger.info("🕐 高精度定时调度器已启动（毫秒级精准触发）")
+        logger.info("🕐 高精度定时调度器已启动（毫秒级精准触发 + HTTP时间校准）")
         while self.scheduler_running:
             try:
                 now = datetime.now()
@@ -1710,6 +1774,7 @@ class KuwoPlugin(Star):
                     await asyncio.sleep(30)
                     continue
 
+                # 去重：同一用户同一类型只保留最早的一个
                 unique = {}
                 for nt, uid, typ, udata in events:
                     key = (uid, typ)
@@ -1718,6 +1783,7 @@ class KuwoPlugin(Star):
                 events = list(unique.values())
                 events.sort(key=lambda x: x[0])
 
+                # 处理已到期任务（最近 30 秒内，避免陈旧事件堆积）
                 expired = [e for e in events if e[0] <= now and (now - e[0]).total_seconds() <= 30]
                 if expired:
                     for nt, uid, typ, udata in expired:
@@ -1735,18 +1801,43 @@ class KuwoPlugin(Star):
                     await asyncio.sleep(30)
                     continue
 
-                if delay > 0:
-                    await asyncio.sleep(delay)
+                # ============ 时间校准区 ============
+                # 仅在临近触发（3~30 秒内）且缓存过期（>60 秒）时校准一次
+                now_ts = time.time()
+                need_calibrate = (
+                    3 <= delay <= 30
+                    and (now_ts - self._time_offset_updated_at) > 60
+                )
+                if need_calibrate:
+                    self._time_offset = await self._calibrate_time()
+                    self._time_offset_updated_at = time.time()
+                    # 校准耗时后重新计算 delay
+                    now = datetime.now()
+                    delay = (next_time - now).total_seconds()
+                # ====================================
 
-                now2 = datetime.now()
+                # 根据时钟偏移计算本地实际需要等待的秒数
+                # 标准时间 = 本地时间 + offset  →  本地需等待 = delay - offset
+                # 再减 20ms 作为协程调度/请求构造缓冲，让请求在整点前瞬间发出
+                wait_sec = delay - self._time_offset - 0.02
+
+                if wait_sec > 0:
+                    await asyncio.sleep(wait_sec)
+
+                # 用校准后的时间判断是否到期
+                now_standard_ts = self._get_calibrated_now_ts()
                 fired = []
                 for nt, uid, typ, udata in events:
-                    if (now2 - nt).total_seconds() >= -0.005:
+                    if now_standard_ts >= nt.timestamp() - 0.005:
                         fired.append((nt, uid, typ, udata))
 
                 for nt, uid, typ, udata in fired:
-                    actual = datetime.now().strftime('%H:%M:%S.%f')
-                    logger.info(f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 实际 {actual}")
+                    local_actual = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                    logger.info(
+                        f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, "
+                        f"目标 {nt.strftime('%H:%M:%S')}, 本地实际 {local_actual}, "
+                        f"时钟偏移 {self._time_offset*1000:+.0f}ms"
+                    )
                     if typ == 'code':
                         asyncio.create_task(self._execute_scheduled_job(uid, preloaded_data=udata))
                     elif typ == 'withdraw':
@@ -2234,6 +2325,7 @@ class KuwoPlugin(Star):
             async def send_for_all(phone_info):
                 phone = phone_info["phone"]
                 password = phone_info["password"]
+                # 【优化】to_thread 避免阻塞事件循环
                 login = await asyncio.to_thread(login_kuwo, phone, password)
                 if not login:
                     return (phone, "登录失败", False)
@@ -2375,6 +2467,7 @@ class KuwoPlugin(Star):
             if not password:
                 results.append(f"❌ {phone}: 未找到密码")
                 continue
+            # 【优化】to_thread 避免阻塞事件循环
             login = await asyncio.to_thread(login_kuwo, phone, password)
             if not login:
                 results.append(f"❌ {phone}: 登录失败")
