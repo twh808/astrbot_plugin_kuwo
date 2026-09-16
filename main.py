@@ -1681,11 +1681,12 @@ class KuwoPlugin(Star):
     # ======================================================================
     # 时间校准（提现准点关键）
     # ======================================================================
-    async def _calibrate_time(self, samples=3):
+    async def _calibrate_time(self, samples=4):
         """
         通过多个 HTTP 时间源校准本地时钟。
         返回本地时间需要修正的偏移量（秒）：标准时间 = 本地时间 + offset
-        使用 HTTP Date 响应头，多源取中位数抗抖动。
+        - 用最小 RTT 的样本（RTT 越小，offset 估计越准）
+        - 加合理性检查：绝对值 > 5 秒视为异常，拒绝使用
         """
         sources = [
             "https://www.baidu.com",
@@ -1693,7 +1694,7 @@ class KuwoPlugin(Star):
             "https://www.taobao.com",
             "https://www.jd.com",
         ][:samples]
-        offsets = []
+        samples_list = []  # [(rtt, offset), ...]
 
         for url in sources:
             try:
@@ -1712,25 +1713,34 @@ class KuwoPlugin(Star):
                 rtt = t1 - t0
                 # 假设网络往返对称：服务器时间 server_ts 对应本地的 t0 + rtt/2
                 # 本地在 t1 时，标准时间应为 server_ts + rtt/2
-                # offset = 标准时间 - 本地时间
                 offset = (server_ts + rtt / 2) - t1
-                offsets.append(offset)
+                samples_list.append((rtt, offset))
             except Exception as e:
                 logger.debug(f"时间源 {url} 校准失败: {e}")
                 continue
 
-        if not offsets:
+        if not samples_list:
             logger.warning("⚠️ 时间校准失败：所有时间源均不可用，使用本地时间")
             return 0.0
 
-        offsets.sort()
-        median = offsets[len(offsets) // 2]
-        spread = offsets[-1] - offsets[0] if len(offsets) > 1 else 0.0
+        # 取 RTT 最小的样本（网络最通畅，offset 估计最准）
+        samples_list.sort(key=lambda x: x[0])
+        best_rtt, best_offset = samples_list[0]
+
+        # 合理性检查：偏差超过 5 秒视为异常（正常时钟漂移不会这么大）
+        if abs(best_offset) > 5.0:
+            logger.warning(
+                f"⚠️ 时间校准结果异常（偏移 {best_offset*1000:+.0f}ms > 5s），"
+                f"可能是时间源缓存，改用本地时间"
+            )
+            return 0.0
+
+        rtts = [f"{r*1000:.0f}ms" for r, _ in samples_list]
         logger.info(
-            f"⏱️ 时间校准完成：偏移 {median*1000:+.0f}ms "
-            f"(源数 {len(offsets)}, 极差 {spread*1000:.0f}ms)"
+            f"⏱️ 时间校准完成：偏移 {best_offset*1000:+.0f}ms "
+            f"(最优RTT {best_rtt*1000:.0f}ms, 所有RTT [{', '.join(rtts)}])"
         )
-        return median
+        return best_offset
 
     def _get_calibrated_now_ts(self) -> float:
         """返回校准后的当前标准时间戳（秒）"""
@@ -1816,20 +1826,37 @@ class KuwoPlugin(Star):
                     delay = (next_time - now).total_seconds()
                 # ====================================
 
-                # 根据时钟偏移计算本地实际需要等待的秒数
-                # 标准时间 = 本地时间 + offset  →  本地需等待 = delay - offset
-                # 再减 20ms 作为协程调度/请求构造缓冲，让请求在整点前瞬间发出
-                wait_sec = delay - self._time_offset - 0.02
+                # ============ 精确等待到触发时刻 ============
+                # 循环等待，防止 asyncio.sleep 提前返回导致漏触发
+                # 每次最多睡 0.5 秒，保证精度和鲁棒性
+                while True:
+                    now_standard_ts = self._get_calibrated_now_ts()
+                    min_remaining = None
+                    for nt, uid, typ, udata in events:
+                        r = nt.timestamp() - now_standard_ts
+                        if r > 0.005:
+                            if min_remaining is None or r < min_remaining:
+                                min_remaining = r
+                    if min_remaining is None:
+                        break  # 所有任务都已到期
+                    await asyncio.sleep(min(min_remaining, 0.5))
+                # ============================================
 
-                if wait_sec > 0:
-                    await asyncio.sleep(wait_sec)
-
-                # 用校准后的时间判断是否到期
+                # 触发所有已到点的任务
                 now_standard_ts = self._get_calibrated_now_ts()
                 fired = []
                 for nt, uid, typ, udata in events:
                     if now_standard_ts >= nt.timestamp() - 0.005:
                         fired.append((nt, uid, typ, udata))
+
+                # 【诊断】如果到点了却没触发，打印原因
+                if not fired:
+                    logger.warning(
+                        f"⚠️ 等待结束但无任务触发："
+                        f"calibrated_now={now_standard_ts:.3f}, "
+                        f"最近目标={events[0][0].timestamp():.3f}, "
+                        f"偏移={self._time_offset*1000:+.0f}ms"
+                    )
 
                 for nt, uid, typ, udata in fired:
                     local_actual = datetime.now().strftime('%H:%M:%S.%f')[:-3]
