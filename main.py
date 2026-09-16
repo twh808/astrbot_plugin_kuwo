@@ -178,7 +178,8 @@ def login_kuwo(username, password):
         logger.error(f"酷我登录异常: {e}")
         return None
 
-def check_withdraw_today(loginUid, loginSid):
+def check_withdraw_today(loginUid, loginSid, target_date_str=None):
+    """检查指定日期（默认今天）是否已提现过；target_date_str 由调用方传入以支持'23-24点视为第二天'"""
     try:
         resp = requests.get(
             'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdrawDetails',
@@ -194,9 +195,10 @@ def check_withdraw_today(loginUid, loginSid):
         data = resp.json()
         if data.get('code') != 200:
             return False
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        if target_date_str is None:
+            target_date_str = datetime.now().strftime('%Y-%m-%d')
         for item in data.get('data', {}).get('list', []):
-            if item.get('createTime', '').startswith(today_str):
+            if item.get('createTime', '').startswith(target_date_str):
                 if item.get('status') == 1 or '提现成功' in item.get('description', ''):
                     return True
         return False
@@ -431,6 +433,14 @@ class KuwoPlugin(Star):
         except asyncio.CancelledError:
             pass
 
+    # ---------- 业务日期（23-24点视为第二天） ----------
+    def _get_effective_today_str(self) -> str:
+        """业务'今天'：23:00-23:59 视为第二天；其他时间返回当天"""
+        now = datetime.now()
+        if now.hour >= 23:
+            return (now + timedelta(days=1)).strftime('%Y-%m-%d')
+        return now.strftime('%Y-%m-%d')
+
     # ---------- 菜单文本 ----------
     async def _get_main_menu_text(self, user_id: str) -> str:
         user_data = await self._load_data(user_id)
@@ -482,13 +492,18 @@ class KuwoPlugin(Star):
             lines.append(f"{emoji} {acc['phone']}")
         return "\n".join(lines)
 
-    def _send_code_for_phone_sync(self, phone: str, password: str) -> tuple:
+    def _send_code_for_phone_sync(self, phone: str, password: str, check_today: bool = False) -> tuple:
+        """
+        同步：登录 → (可选)检查今日提现 → 发送验证码
+        check_today=False：手动获取验证码时跳过提现检查
+        check_today=True：定时任务时启用检查（用业务日期，23-24点视为第二天）
+        """
         try:
             login = login_kuwo(phone, password)
             if not login:
                 return (phone, "登录失败", False)
             uid, sid, appuid, _ = login
-            if check_withdraw_today(uid, sid):
+            if check_today and check_withdraw_today(uid, sid, self._get_effective_today_str()):
                 return (phone, "今日已提现，跳过", False)
             success, msg = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id)
             return (phone, msg, success)
@@ -510,13 +525,13 @@ class KuwoPlugin(Star):
             return None, "❌ 输入格式错误，请输入数字序号（用逗号分隔）或 all"
         return phones, None
 
-    async def _send_codes_concurrently(self, phones: list, account_map: dict) -> list:
+    async def _send_codes_concurrently(self, phones: list, account_map: dict, check_today: bool = False) -> list:
         task_phones = [p for p in phones if p in account_map]
         missing = [p for p in phones if p not in account_map]
         result_by_phone = {}
         if task_phones:
             task_results = await asyncio.gather(*[
-                asyncio.to_thread(self._send_code_for_phone_sync, p, account_map[p]) for p in task_phones
+                asyncio.to_thread(self._send_code_for_phone_sync, p, account_map[p], check_today) for p in task_phones
             ])
             for p, m, ok in task_results:
                 result_by_phone[p] = f"{'✅' if ok else '❌'} {p}: {m}"
@@ -796,7 +811,7 @@ class KuwoPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result(self._withdraw_menu())
 
-    # ---------- 验证码发送选择 ----------
+    # ---------- 验证码发送选择（手动 → 不检查提现） ----------
     @filter.regex(r'^(all|[\d,]+|0)$')
     async def handle_send_select(self, event: AstrMessageEvent):
         if getattr(event, '_verify_choice_processed', False):
@@ -829,7 +844,8 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._verify_menu())
             return
         account_map = {acc["phone"]: acc["password"] for acc in accounts}
-        ordered = await self._send_codes_concurrently(phones_to_send, account_map)
+        # 手动获取：check_today=False，不检查今日提现情况
+        ordered = await self._send_codes_concurrently(phones_to_send, account_map, check_today=False)
         yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(ordered))
         self._update_state(user_id, menu='main', step=None)
         self._schedule_timeout(user_id)
@@ -1108,7 +1124,8 @@ class KuwoPlugin(Star):
                 self._code_cache_mem[user_id].pop(phone, None)
             if user_id in self._login_cache_mem:
                 self._login_cache_mem[user_id].pop(phone, None)
-        today = datetime.now().strftime("%Y-%m-%d")
+        # 业务日期：23-24 点视为第二天
+        today = self._get_effective_today_str()
         user_data.setdefault("daily_withdraw", {}).setdefault(today, {})
         for phone, _, _, ok in results:
             if ok:
@@ -1211,7 +1228,8 @@ class KuwoPlugin(Star):
                     seen.add(acc['phone'])
                     unique_accounts.append(acc)
             account_map = {a['phone']: a['password'] for a in unique_accounts}
-            ordered = await self._send_codes_concurrently([a['phone'] for a in unique_accounts], account_map)
+            # 定时任务：check_today=True，检查今日提现（23-24 点视为第二天）
+            ordered = await self._send_codes_concurrently([a['phone'] for a in unique_accounts], account_map, check_today=True)
             result_msg = ("🔹 手动执行结果：\n" if is_manual else "⏰ 定时获取验证码完成\n") + "\n".join(ordered)
             logger.info(result_msg)
             await self._send_result(user_id, result_msg)
@@ -1315,18 +1333,17 @@ class KuwoPlugin(Star):
                             asyncio.create_task(self._execute_withdraw_scheduled_job(uid, preloaded_data=udata))
                     continue
 
-                # 只关注最近的一个事件（修 Bug：不再被更远的后续事件"拖住"）
+                # 只关注最近的一个事件（不再被更远的后续事件"拖住"）
                 next_time, next_uid, next_typ, next_udata = events[0]
                 delay = (next_time - now).total_seconds()
                 if delay > 30:
                     await asyncio.sleep(30)
                     continue
 
-                # 时间校准：仅当 events 里存在 withdraw 事件时才触发
-                # 验证码用本地时钟（秒级精度足够），提现用校准时间（毫秒级精准）
-                has_withdraw_event = any(typ == 'withdraw' for _, _, typ, _ in events)
+                # 【最优方案】时间校准：仅当下一个事件（最近的）是 withdraw 时才触发
+                # 验证码用本地时钟即可，无需网络校准，省时省流量
                 now_ts = time.time()
-                if has_withdraw_event and 3 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 300:
+                if next_typ == 'withdraw' and 3 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 300:
                     self._time_offset = await self._calibrate_time()
                     self._time_offset_updated_at = time.time()
 
@@ -1642,7 +1659,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    # ---------- 管理员发送验证码 ----------
+    # ---------- 管理员发送验证码（手动 → 不检查） ----------
     @filter.regex(r'^(all|\d+)$')
     async def handle_admin_send_code_select_user(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1677,8 +1694,9 @@ class KuwoPlugin(Star):
                 self._update_state(user_id, menu='admin', step=None)
                 yield event.plain_result(self._admin_menu())
                 return
+            # 管理员 all：check_today=False（按手动处理）
             task_results = await asyncio.gather(*[
-                asyncio.to_thread(self._send_code_for_phone_sync, p["phone"], p["password"])
+                asyncio.to_thread(self._send_code_for_phone_sync, p["phone"], p["password"], False)
                 for p in all_phones
             ])
             results = [f"{'✅' if ok else '❌'} {p}: {m}" for p, m, ok in task_results]
@@ -1750,7 +1768,8 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
         account_map = {acc["phone"]: acc["password"] for acc in accounts}
-        ordered = await self._send_codes_concurrently(phones_to_send, account_map)
+        # 管理员指定账号：check_today=False（按手动处理）
+        ordered = await self._send_codes_concurrently(phones_to_send, account_map, check_today=False)
         yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(ordered))
         self._update_state(user_id, menu='admin', step=None)
         self._schedule_timeout(user_id)
