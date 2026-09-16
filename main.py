@@ -1276,7 +1276,7 @@ class KuwoPlugin(Star):
         return None
 
     async def _scheduler_loop(self):
-        logger.info("🕐 高精度定时调度器已启动（毫秒级精准触发 + HTTP时间校准）")
+        logger.info("🕐 高精度定时调度器已启动（验证码本地时钟，提现HTTP时间校准）")
         while self.scheduler_running:
             try:
                 now = datetime.now()
@@ -1296,12 +1296,15 @@ class KuwoPlugin(Star):
                 if not events:
                     await asyncio.sleep(30)
                     continue
+                # 去重：同一用户同一类型只保留最早的一个
                 unique = {}
                 for nt, uid, typ, udata in events:
                     key = (uid, typ)
                     if key not in unique or nt < unique[key][0]:
                         unique[key] = (nt, uid, typ, udata)
                 events = sorted(unique.values(), key=lambda x: x[0])
+
+                # 处理已到期任务（最近 30 秒内，避免陈旧事件堆积）
                 expired = [e for e in events if e[0] <= now and (now - e[0]).total_seconds() <= 30]
                 if expired:
                     for nt, uid, typ, udata in expired:
@@ -1311,40 +1314,57 @@ class KuwoPlugin(Star):
                         else:
                             asyncio.create_task(self._execute_withdraw_scheduled_job(uid, preloaded_data=udata))
                     continue
-                next_time = events[0][0]
+
+                # 只关注最近的一个事件（修 Bug：不再被更远的后续事件"拖住"）
+                next_time, next_uid, next_typ, next_udata = events[0]
                 delay = (next_time - now).total_seconds()
                 if delay > 30:
                     await asyncio.sleep(30)
                     continue
+
+                # 时间校准：仅当 events 里存在 withdraw 事件时才触发
+                # 验证码用本地时钟（秒级精度足够），提现用校准时间（毫秒级精准）
+                has_withdraw_event = any(typ == 'withdraw' for _, _, typ, _ in events)
                 now_ts = time.time()
-                if 3 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 300:
+                if has_withdraw_event and 3 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 300:
                     self._time_offset = await self._calibrate_time()
                     self._time_offset_updated_at = time.time()
-                    now = datetime.now()
-                    delay = (next_time - now).total_seconds()
-                while True:
-                    now_standard_ts = self._get_calibrated_now_ts()
-                    min_remaining = None
-                    for nt, _, _, _ in events:
-                        r = nt.timestamp() - now_standard_ts
-                        if r > 0.005 and (min_remaining is None or r < min_remaining):
-                            min_remaining = r
-                    if min_remaining is None:
+
+                # 精确等待最近这一个事件（next_time）到点
+                # code 用本地时间，withdraw 用校准后的标准时间
+                next_ts = next_time.timestamp()
+                while self.scheduler_running:
+                    now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
+                    r = next_ts - now_ref
+                    if r <= 0.005:
                         break
-                    await asyncio.sleep(min(min_remaining, 0.5))
-                now_standard_ts = self._get_calibrated_now_ts()
-                fired = [(nt, uid, typ, udata) for nt, uid, typ, udata in events
-                         if now_standard_ts >= nt.timestamp() - 0.005]
+                    await asyncio.sleep(min(r, 0.5))
+
+                # 触发所有"已到点"的事件（含可能同时到达的多个）
+                fired = []
+                for nt, uid, typ, udata in events:
+                    now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
+                    if now_ref >= nt.timestamp() - 0.005:
+                        fired.append((nt, uid, typ, udata))
+
                 if not fired:
-                    logger.warning(f"⚠️ 等待结束但无任务触发：calibrated_now={now_standard_ts:.3f}, "
-                                   f"最近目标={events[0][0].timestamp():.3f}, 偏移={self._time_offset*1000:+.0f}ms")
+                    logger.warning(
+                        f"⚠️ 等待结束但无任务触发：next={next_time.strftime('%H:%M:%S.%f')}, "
+                        f"now={datetime.now().strftime('%H:%M:%S.%f')}, "
+                        f"typ={next_typ}, offset={self._time_offset*1000:+.0f}ms"
+                    )
+
                 for nt, uid, typ, udata in fired:
-                    logger.info(f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 目标 {nt.strftime('%H:%M:%S')}, "
-                                f"本地实际 {datetime.now().strftime('%H:%M:%S.%f')[:-3]}, 时钟偏移 {self._time_offset*1000:+.0f}ms")
+                    logger.info(
+                        f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 目标 {nt.strftime('%H:%M:%S')}, "
+                        f"本地实际 {datetime.now().strftime('%H:%M:%S.%f')[:-3]}, "
+                        f"时钟偏移 {self._time_offset*1000:+.0f}ms"
+                    )
                     if typ == 'code':
                         asyncio.create_task(self._execute_scheduled_job(uid, preloaded_data=udata))
                     else:
                         asyncio.create_task(self._execute_withdraw_scheduled_job(uid, preloaded_data=udata))
+
             except Exception as e:
                 logger.error(f"调度循环异常: {e}")
                 await asyncio.sleep(30)
