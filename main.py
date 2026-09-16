@@ -222,6 +222,7 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'
             data = resp.json()
             combined = f"{data.get('msg', '')}|{data.get('data', {}).get('description', '')}"
         except:
+            data = {}
             combined = text
         lower_text = (text + str(data.get('msg', '')) + str(data.get('data', {}).get('description', ''))).lower()
         return '发送成功' in lower_text, combined
@@ -482,7 +483,6 @@ class KuwoPlugin(Star):
         return "\n".join(lines)
 
     def _send_code_for_phone_sync(self, phone: str, password: str) -> tuple:
-        """同步：登录 → 检查今日提现 → 发送验证码；返回 (phone, msg, success)"""
         try:
             login = login_kuwo(phone, password)
             if not login:
@@ -496,7 +496,6 @@ class KuwoPlugin(Star):
             return (phone, f"异常: {e}", False)
 
     def _parse_phone_selection(self, text: str, accounts: list) -> tuple:
-        """解析用户输入（all / 数字 / 逗号分隔），返回 (phones_list, error_msg)"""
         if text == "all":
             return [acc["phone"] for acc in accounts], None
         phones = []
@@ -512,7 +511,6 @@ class KuwoPlugin(Star):
         return phones, None
 
     async def _send_codes_concurrently(self, phones: list, account_map: dict) -> list:
-        """并发发送验证码，按 phones 顺序返回结果列表"""
         task_phones = [p for p in phones if p in account_map]
         missing = [p for p in phones if p not in account_map]
         result_by_phone = {}
@@ -830,7 +828,6 @@ class KuwoPlugin(Star):
             self._update_state(user_id, menu='verify', step=None)
             yield event.plain_result(self._verify_menu())
             return
-        # 【优化】_send_codes_concurrently 保证结果按输入顺序
         account_map = {acc["phone"]: acc["password"] for acc in accounts}
         ordered = await self._send_codes_concurrently(phones_to_send, account_map)
         yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(ordered))
@@ -886,7 +883,6 @@ class KuwoPlugin(Star):
             return
         if text in ("q", "Q"):
             return
-        # 【修复】空文本不能作为验证码，保持等待状态
         if not text:
             yield event.plain_result("❌ 验证码不能为空，请重新输入（发送 q 取消）")
             return
@@ -1231,4 +1227,680 @@ class KuwoPlugin(Star):
             except Exception as e:
                 logger.error(f"发送消息失败: {e}")
         else:
-            logger.info(f"用户 {user_id} 无会话
+            logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
+
+    # ---------- 时间校准 ----------
+    async def _calibrate_time(self, samples=2):
+        sources = ["https://www.baidu.com", "https://www.qq.com", "https://www.taobao.com", "https://www.jd.com"][:samples]
+        samples_list = []
+        for url in sources:
+            try:
+                t0 = time.time()
+                resp = await asyncio.to_thread(requests.head, url, timeout=3, allow_redirects=False)
+                t1 = time.time()
+                date_header = resp.headers.get('Date')
+                if not date_header:
+                    continue
+                server_dt = email.utils.parsedate_to_datetime(date_header)
+                if server_dt is None:
+                    continue
+                rtt = t1 - t0
+                offset = (server_dt.timestamp() + rtt / 2) - t1
+                samples_list.append((rtt, offset))
+            except Exception as e:
+                logger.debug(f"时间源 {url} 校准失败: {e}")
+        if not samples_list:
+            logger.warning("⚠️ 时间校准失败：所有时间源均不可用，使用本地时间")
+            return 0.0
+        samples_list.sort(key=lambda x: x[0])
+        best_rtt, best_offset = samples_list[0]
+        if abs(best_offset) > 5.0:
+            logger.warning(f"⚠️ 时间校准结果异常（偏移 {best_offset*1000:+.0f}ms > 5s），改用本地时间")
+            return 0.0
+        rtts = [f"{r*1000:.0f}ms" for r, _ in samples_list]
+        logger.info(f"⏱️ 时间校准完成：偏移 {best_offset*1000:+.0f}ms (最优RTT {best_rtt*1000:.0f}ms, 所有RTT [{', '.join(rtts)}])")
+        return best_offset
+
+    def _get_calibrated_now_ts(self) -> float:
+        return time.time() + self._time_offset
+
+    # ---------- 调度器 ----------
+    def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
+        cron_dict = self._parse_cron(cron_expr)
+        dt = (from_dt + timedelta(seconds=1)).replace(microsecond=0)
+        limit = from_dt + timedelta(days=365)
+        while dt <= limit:
+            if self._match_cron(cron_dict, dt):
+                return dt
+            dt += timedelta(seconds=1)
+        return None
+
+    async def _scheduler_loop(self):
+        logger.info("🕐 高精度定时调度器已启动（毫秒级精准触发 + HTTP时间校准）")
+        while self.scheduler_running:
+            try:
+                now = datetime.now()
+                all_data = await self._load_all_data()
+                events = []
+                for user_id, user_data in all_data.items():
+                    job = user_data.get('scheduled_job', {})
+                    if job.get('cron') and job.get('enabled'):
+                        nt = self._get_next_match_time(job['cron'], now)
+                        if nt:
+                            events.append((nt, user_id, 'code', user_data))
+                    wjob = user_data.get('withdraw_scheduled_job', {})
+                    if wjob.get('cron') and wjob.get('enabled'):
+                        nt = self._get_next_match_time(wjob['cron'], now)
+                        if nt:
+                            events.append((nt, user_id, 'withdraw', user_data))
+                if not events:
+                    await asyncio.sleep(30)
+                    continue
+                unique = {}
+                for nt, uid, typ, udata in events:
+                    key = (uid, typ)
+                    if key not in unique or nt < unique[key][0]:
+                        unique[key] = (nt, uid, typ, udata)
+                events = sorted(unique.values(), key=lambda x: x[0])
+                expired = [e for e in events if e[0] <= now and (now - e[0]).total_seconds() <= 30]
+                if expired:
+                    for nt, uid, typ, udata in expired:
+                        logger.info(f"⏰ 触发已到期任务: 用户 {uid}, 类型 {typ}, 原定 {nt.strftime('%H:%M:%S.%f')}")
+                        if typ == 'code':
+                            asyncio.create_task(self._execute_scheduled_job(uid, preloaded_data=udata))
+                        else:
+                            asyncio.create_task(self._execute_withdraw_scheduled_job(uid, preloaded_data=udata))
+                    continue
+                next_time = events[0][0]
+                delay = (next_time - now).total_seconds()
+                if delay > 30:
+                    await asyncio.sleep(30)
+                    continue
+                now_ts = time.time()
+                if 3 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 300:
+                    self._time_offset = await self._calibrate_time()
+                    self._time_offset_updated_at = time.time()
+                    now = datetime.now()
+                    delay = (next_time - now).total_seconds()
+                while True:
+                    now_standard_ts = self._get_calibrated_now_ts()
+                    min_remaining = None
+                    for nt, _, _, _ in events:
+                        r = nt.timestamp() - now_standard_ts
+                        if r > 0.005 and (min_remaining is None or r < min_remaining):
+                            min_remaining = r
+                    if min_remaining is None:
+                        break
+                    await asyncio.sleep(min(min_remaining, 0.5))
+                now_standard_ts = self._get_calibrated_now_ts()
+                fired = [(nt, uid, typ, udata) for nt, uid, typ, udata in events
+                         if now_standard_ts >= nt.timestamp() - 0.005]
+                if not fired:
+                    logger.warning(f"⚠️ 等待结束但无任务触发：calibrated_now={now_standard_ts:.3f}, "
+                                   f"最近目标={events[0][0].timestamp():.3f}, 偏移={self._time_offset*1000:+.0f}ms")
+                for nt, uid, typ, udata in fired:
+                    logger.info(f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 目标 {nt.strftime('%H:%M:%S')}, "
+                                f"本地实际 {datetime.now().strftime('%H:%M:%S.%f')[:-3]}, 时钟偏移 {self._time_offset*1000:+.0f}ms")
+                    if typ == 'code':
+                        asyncio.create_task(self._execute_scheduled_job(uid, preloaded_data=udata))
+                    else:
+                        asyncio.create_task(self._execute_withdraw_scheduled_job(uid, preloaded_data=udata))
+            except Exception as e:
+                logger.error(f"调度循环异常: {e}")
+                await asyncio.sleep(30)
+
+    # ---------- Cron 解析（带缓存） ----------
+    def _parse_cron(self, cron_expr: str) -> dict:
+        if cron_expr in self._cron_cache:
+            return self._cron_cache[cron_expr]
+        parts = cron_expr.split()
+        if len(parts) == 5:
+            parts = ['*'] + parts
+        fields = ['second', 'minute', 'hour', 'day', 'month', 'weekday']
+        result = {}
+        for i, part in enumerate(parts):
+            if part == '*':
+                result[fields[i]] = None
+                continue
+            values = set()
+            if '/' in part:
+                base, step = part.split('/')
+                step = int(step)
+                if base == '*':
+                    max_val = {'second': 59, 'minute': 59, 'hour': 23, 'day': 31, 'month': 12, 'weekday': 7}[fields[i]]
+                    values = set(range(0, max_val + 1, step))
+                elif '-' in base:
+                    start, end = map(int, base.split('-'))
+                    values = set(range(start, end + 1, step))
+                else:
+                    values = {int(base)}
+            elif '-' in part:
+                start, end = map(int, part.split('-'))
+                values = set(range(start, end + 1))
+            elif ',' in part:
+                values = set(int(x) for x in part.split(','))
+            else:
+                values = {int(part)}
+            result[fields[i]] = sorted(values) if values else None
+        if len(self._cron_cache) > 100:
+            self._cron_cache.clear()
+        self._cron_cache[cron_expr] = result
+        return result
+
+    def _match_cron(self, cron_dict: dict, dt: datetime) -> bool:
+        for field, values in cron_dict.items():
+            if values is None:
+                continue
+            current = {'second': dt.second, 'minute': dt.minute, 'hour': dt.hour,
+                       'day': dt.day, 'month': dt.month, 'weekday': dt.weekday() + 1}[field]
+            if current not in values:
+                return False
+        return True
+
+    # ---------- 管理员查看提现记录 ----------
+    async def _view_last_withdraw_logs(self) -> str:
+        all_data = await self._load_all_data()
+        if not all_data:
+            return "📭 暂无用户数据。"
+        blocks = []
+        for uid, udata in all_data.items():
+            log = udata.get('last_withdraw_log')
+            if log:
+                result = log.get('result', '')
+                s = re.search(r'✅ 成功: (\d+)', result)
+                f = re.search(r'❌ 失败: (\d+)', result)
+                k = re.search(r'⏭️ 跳过: (\d+)', result)
+                summary = f"成功 {s.group(1) if s else 0} / 失败 {f.group(1) if f else 0} / 跳过 {k.group(1) if k else 0}"
+                blocks.append(f"┌─────────────────────────\n│ 👤 QQ {uid}\n│ 🕐 时间：{log.get('time', '未知')}\n"
+                              f"│ 📊 概况：{summary}\n│ 📝 详情：\n│   {result.replace(chr(10), chr(10) + '│   ')}\n└─────────────────────────")
+            else:
+                blocks.append(f"┌─────────────────────────\n│ 👤 QQ {uid}\n│ 📭 暂无提现记录\n└─────────────────────────")
+        return "📋 最近提现记录：\n\n" + "\n\n".join(blocks)
+
+    # ---------- 管理员菜单主处理器 ----------
+    @filter.regex(r'^[0-7]$')
+    async def handle_admin_choice(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('menu') != 'admin' or state.get('step'):
+            return
+        if user_id not in self.admin_qq:
+            self._clear_state(user_id)
+            yield event.plain_result("⛔ 权限已变更，请重新操作。")
+            return
+        setattr(event, '_admin_choice_processed', True)
+        self._cancel_timeout(user_id)
+        self._schedule_timeout(user_id)
+        text = event.message_str.strip()
+        if text == "0":
+            self._clear_state(user_id)
+            yield event.plain_result("👋 已退出管理面板")
+            return
+        if text in ("1", "2", "3", "4", "6"):
+            all_data = await self._load_all_data()
+            if not all_data:
+                yield event.plain_result("📭 暂无用户数据。")
+                self._update_state(user_id, menu='admin', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(self._admin_menu())
+                return
+            user_list = self._format_admin_user_list(all_data)
+            if text == "1":
+                lines = ["📋 所有用户账号信息：", ""]
+                for uid, udata in all_data.items():
+                    accounts = udata.get('accounts', [])
+                    lines.append(f"👤 QQ {uid}")
+                    if accounts:
+                        for acc in accounts:
+                            lines.append(f"   📱 {acc['phone']}")
+                    else:
+                        lines.append("   (无账号)")
+                    lines.append("")
+                yield event.plain_result("\n".join(lines))
+                self._update_state(user_id, menu='admin', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(self._admin_menu())
+            elif text == "2":
+                prompt = "请选择要删除账号的用户序号：\n" + user_list + "\n请输入序号，输入 0 取消："
+                self._update_state(user_id, step='admin_del_select', tmp_data={'all_users': list(all_data.keys())})
+                yield event.plain_result(prompt)
+            elif text == "3":
+                prompt = "请选择要修改授权次数的用户序号：\n" + user_list + "\n请输入序号，输入 0 取消："
+                self._update_state(user_id, step='admin_mod_limit_select', tmp_data={'all_users': list(all_data.keys())})
+                yield event.plain_result(prompt)
+            elif text == "4":
+                prompt = "请选择要发送验证码的用户序号（输入 all 发送全部）：\n" + user_list + "\n请输入序号或 all，输入 0 取消："
+                self._update_state(user_id, step='admin_send_code_select_user', tmp_data={'all_users': list(all_data.keys())})
+                yield event.plain_result(prompt)
+            elif text == "6":
+                prompt = "请选择要重置数据的用户序号：\n" + user_list + "\n请输入序号，输入 0 取消："
+                self._update_state(user_id, step='admin_reset_select', tmp_data={'all_users': list(all_data.keys())})
+                yield event.plain_result(prompt)
+        elif text == "5":
+            self._update_state(user_id, step='admin_bind_user')
+            self._schedule_timeout(user_id)
+            yield event.plain_result("请输入要绑定账号的目标用户QQ号：")
+        elif text == "7":
+            yield event.plain_result(await self._view_last_withdraw_logs())
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+
+    # ---------- 管理员子步骤 ----------
+    @filter.regex(r'^\d+$')
+    async def handle_admin_del_select(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_del_select':
+            return
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        try:
+            idx = int(text) - 1
+        except:
+            yield event.plain_result("❌ 请输入有效的数字序号。")
+            return
+        all_users = state.get('tmp_data', {}).get('all_users', [])
+        if idx < 0 or idx >= len(all_users):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(all_users)} 之间的数字。")
+            return
+        target_uid = all_users[idx]
+        all_data = await self._load_all_data()
+        accounts = all_data[target_uid].get('accounts', [])
+        if not accounts:
+            yield event.plain_result(f"📭 用户 {target_uid} 没有绑定账号。")
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        prompt = f"用户 {target_uid} 的账号列表：\n" + self._format_accounts_list(accounts) + "\n请输入要删除的序号（多个用逗号分隔），输入 0 取消："
+        self._update_state(user_id, step='admin_del_choose', tmp_data={'target_uid': target_uid, 'accounts': accounts})
+        setattr(event, '_admin_sub_processed', True)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(prompt)
+
+    @filter.regex(r'^[\d,]+$')
+    async def handle_admin_del_choose(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_del_choose':
+            return
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        tmp = state.get('tmp_data', {})
+        target_uid, accounts = tmp.get('target_uid'), tmp.get('accounts', [])
+        to_delete = []
+        for idx_str in text.split(','):
+            try:
+                idx = int(idx_str.strip()) - 1
+                if 0 <= idx < len(accounts):
+                    to_delete.append(accounts[idx]['phone'])
+                else:
+                    yield event.plain_result(f"❌ 序号 {idx_str} 无效，请重新输入")
+                    return
+            except ValueError:
+                yield event.plain_result("❌ 请输入有效的数字序号，用逗号分隔。")
+                return
+        if not to_delete:
+            yield event.plain_result("❌ 未选择任何账号。")
+            self._update_state(user_id, menu='admin', step=None)
+            yield event.plain_result(self._admin_menu())
+            return
+        all_data = await self._load_all_data()
+        if target_uid in all_data:
+            user_data = all_data[target_uid]
+            user_data['accounts'] = [a for a in user_data['accounts'] if a['phone'] not in to_delete]
+            await self._save_data(target_uid, user_data)
+            yield event.plain_result(f"✅ 已删除用户 {target_uid} 的账号：{', '.join(to_delete)}")
+        else:
+            yield event.plain_result(f"❌ 用户 {target_uid} 数据不存在。")
+        self._update_state(user_id, menu='admin', step=None)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(self._admin_menu())
+
+    @filter.regex(r'^\d+$')
+    async def handle_admin_mod_limit_select(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_mod_limit_select':
+            return
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        try:
+            idx = int(text) - 1
+        except:
+            yield event.plain_result("❌ 请输入有效的数字序号。")
+            return
+        all_users = state.get('tmp_data', {}).get('all_users', [])
+        if idx < 0 or idx >= len(all_users):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(all_users)} 之间的数字。")
+            return
+        target_uid = all_users[idx]
+        self._update_state(user_id, step='admin_mod_limit_value', tmp_data={'target_uid': target_uid})
+        setattr(event, '_admin_sub_processed', True)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(f"已选择用户 {target_uid}，请输入新的授权次数（输入 -1 表示无限制）：")
+
+    @filter.regex(r'^-?\d+$')
+    async def handle_admin_mod_limit_value(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_mod_limit_value':
+            return
+        new_limit = int(event.message_str.strip())
+        target_uid = state.get('tmp_data', {}).get('target_uid')
+        all_data = await self._load_all_data()
+        if target_uid not in all_data:
+            yield event.plain_result(f"❌ 用户 {target_uid} 不存在。")
+            self._update_state(user_id, menu='admin', step=None)
+            yield event.plain_result(self._admin_menu())
+            return
+        all_data[target_uid]['auth_limit'] = new_limit
+        await self._save_data(target_uid, all_data[target_uid])
+        yield event.plain_result(f"✅ 用户 {target_uid} 的授权次数已设为 {new_limit if new_limit != -1 else '无限制'} 。")
+        self._update_state(user_id, menu='admin', step=None)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(self._admin_menu())
+
+    # ---------- 管理员发送验证码 ----------
+    @filter.regex(r'^(all|\d+)$')
+    async def handle_admin_send_code_select_user(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_send_code_select_user':
+            return
+        text = event.message_str.strip().lower()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        all_data = await self._load_all_data()
+        if text == "all":
+            if not all_data:
+                yield event.plain_result("📭 暂无用户数据。")
+                self._update_state(user_id, menu='admin', step=None)
+                yield event.plain_result(self._admin_menu())
+                return
+            all_phones = []
+            for uid, udata in all_data.items():
+                accounts = udata.get('accounts', [])
+                auth_limit = udata.get('auth_limit', 0)
+                if auth_limit == 0:
+                    continue
+                for acc in (accounts[:auth_limit] if auth_limit != -1 else accounts):
+                    all_phones.append({"phone": acc['phone'], "password": acc['password']})
+            if not all_phones:
+                yield event.plain_result("❌ 没有可发送验证码的账号（所有用户授权次数均为0或无账号）。")
+                self._update_state(user_id, menu='admin', step=None)
+                yield event.plain_result(self._admin_menu())
+                return
+            task_results = await asyncio.gather(*[
+                asyncio.to_thread(self._send_code_for_phone_sync, p["phone"], p["password"])
+                for p in all_phones
+            ])
+            results = [f"{'✅' if ok else '❌'} {p}: {m}" for p, m, ok in task_results]
+            total_success = sum(1 for _, _, ok in task_results if ok)
+            result_msg = f"📨 全部验证码发送完成\n✅ 成功: {total_success}\n❌ 失败: {len(task_results) - total_success}\n详情：\n" + "\n".join(results)
+            yield event.plain_result(result_msg)
+            self._update_state(user_id, menu='admin', step=None)
+            yield event.plain_result(self._admin_menu())
+            return
+        try:
+            idx = int(text) - 1
+        except:
+            yield event.plain_result("❌ 请输入有效的数字序号。")
+            return
+        all_users = state.get('tmp_data', {}).get('all_users', [])
+        if idx < 0 or idx >= len(all_users):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(all_users)} 之间的数字。")
+            return
+        target_uid = all_users[idx]
+        accounts = all_data[target_uid].get('accounts', [])
+        if not accounts:
+            yield event.plain_result(f"📭 用户 {target_uid} 没有绑定账号。")
+            self._update_state(user_id, menu='admin', step=None)
+            yield event.plain_result(self._admin_menu())
+            return
+        auth_limit = all_data[target_uid].get('auth_limit', 0)
+        if auth_limit == 0:
+            yield event.plain_result(f"❌ 用户 {target_uid} 的授权次数为0，无法发送验证码。")
+            self._update_state(user_id, menu='admin', step=None)
+            yield event.plain_result(self._admin_menu())
+            return
+        display_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
+        prompt = f"用户 {target_uid} 的账号列表：\n" + self._format_accounts_list(display_accounts) + \
+                 "\n请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 取消："
+        self._update_state(user_id, step='admin_send_code_select_account',
+                           tmp_data={'target_uid': target_uid, 'accounts': display_accounts})
+        setattr(event, '_admin_sub_processed', True)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(prompt)
+
+    @filter.regex(r'^(all|[\d,]+|0)$')
+    async def handle_admin_send_code_select_account(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_send_code_select_account':
+            return
+        text = event.message_str.strip().lower()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        tmp = state.get('tmp_data', {})
+        target_uid, accounts = tmp.get('target_uid'), tmp.get('accounts', [])
+        if not target_uid or not accounts:
+            yield event.plain_result("❌ 会话错误，请重新操作。")
+            self._update_state(user_id, menu='admin', step=None)
+            yield event.plain_result(self._admin_menu())
+            return
+        phones_to_send, err = self._parse_phone_selection(text, accounts)
+        if err:
+            yield event.plain_result(err)
+            return
+        if not phones_to_send:
+            yield event.plain_result("❌ 未选择任何账号")
+            self._update_state(user_id, menu='admin', step=None)
+            yield event.plain_result(self._admin_menu())
+            return
+        account_map = {acc["phone"]: acc["password"] for acc in accounts}
+        ordered = await self._send_codes_concurrently(phones_to_send, account_map)
+        yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(ordered))
+        self._update_state(user_id, menu='admin', step=None)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(self._admin_menu())
+
+    # ---------- 管理员重置/绑定 ----------
+    @filter.regex(r'^\d+$')
+    async def handle_admin_reset_select(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_reset_select':
+            return
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        try:
+            idx = int(text) - 1
+        except:
+            yield event.plain_result("❌ 请输入有效的数字序号。")
+            return
+        all_users = state.get('tmp_data', {}).get('all_users', [])
+        if idx < 0 or idx >= len(all_users):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(all_users)} 之间的数字。")
+            return
+        target_uid = all_users[idx]
+        self._update_state(user_id, step='admin_reset_confirm', tmp_data={'target_uid': target_uid})
+        setattr(event, '_admin_sub_processed', True)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(f"⚠️ 即将重置用户 {target_uid} 的所有数据（包括账号、授权次数、验证码缓存等），确定继续？(y/n)")
+
+    @filter.regex(r'^[yYnN]$')
+    async def handle_admin_confirm(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_reset_confirm':
+            return
+        if event.message_str.strip().lower() != 'y':
+            yield event.plain_result("操作已取消。")
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        target_uid = state.get('tmp_data', {}).get('target_uid')
+        if await self._delete_user_data(target_uid):
+            yield event.plain_result(f"✅ 已重置用户 {target_uid} 的所有数据。")
+        else:
+            yield event.plain_result(f"❌ 用户 {target_uid} 数据不存在。")
+        self._update_state(user_id, menu='admin', step=None)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(self._admin_menu())
+
+    @filter.regex(r'^\d+$')
+    async def handle_admin_bind_user(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_bind_user':
+            return
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        self._update_state(user_id, step='admin_bind_account', tmp_data={'target_uid': text})
+        self._schedule_timeout(user_id)
+        yield event.plain_result(f"目标用户 {text}，请输入要绑定的手机号#密码（可多个用 & 分隔），输入 0 取消：")
+
+    @filter.regex(r'^(0|\d{11}#.+)$')
+    async def handle_admin_bind_account(self, event: AstrMessageEvent):
+        if getattr(event, '_admin_sub_processed', False) or getattr(event, '_admin_choice_processed', False):
+            return
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('step') != 'admin_bind_account':
+            return
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='admin', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._admin_menu())
+            return
+        target_uid = state.get('tmp_data', {}).get('target_uid')
+        if not target_uid:
+            yield event.plain_result("❌ 会话错误，请重新操作。")
+            self._update_state(user_id, menu='admin', step=None)
+            yield event.plain_result(self._admin_menu())
+            return
+        user_data = await self._load_data(target_uid)
+        new_accounts, errors = [], []
+        for part in text.split('&'):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                phone, password = part.split('#', 1)
+                phone, password = phone.strip(), password.strip()
+                if not phone or not password:
+                    errors.append(f"格式错误: {part}")
+                    continue
+                existing = next((a for a in user_data["accounts"] if a["phone"] == phone), None)
+                if existing:
+                    existing["password"] = password
+                else:
+                    new_accounts.append({"phone": phone, "password": password})
+            except ValueError:
+                errors.append(f"格式错误: {part}")
+        if errors:
+            yield event.plain_result("❌ 绑定失败：\n" + "\n".join(errors) + "\n请重新输入")
+            return
+        if new_accounts:
+            user_data["accounts"].extend(new_accounts)
+            await self._save_data(target_uid, user_data)
+            yield event.plain_result(f"✅ 成功为 {target_uid} 绑定 {len(new_accounts)} 个账号，当前共 {len(user_data['accounts'])} 个账号")
+        else:
+            await self._save_data(target_uid, user_data)
+            yield event.plain_result("✅ 账号信息已更新（无新增）")
+        self._update_state(user_id, menu='admin', step=None)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(self._admin_menu())
+
+    # ---------- 生命周期 ----------
+    async def initialize(self):
+        logger.info("🚀 酷我插件正在初始化...")
+        all_data = await self._load_all_data()
+        updated = False
+        old_cron = "0 0 9,13,17,20 * * *"
+        new_cron = "0 0 0,9,13,17,20 * * *"
+        for user_id, user_data in all_data.items():
+            if "accounts" in user_data and len(user_data["accounts"]) > 1:
+                unique_dict = {a["phone"]: a for a in user_data["accounts"] if a.get("phone")}
+                if len(unique_dict) < len(user_data["accounts"]):
+                    user_data["accounts"] = list(unique_dict.values())
+                    updated = True
+            if "scheduled_job" not in user_data:
+                user_data["scheduled_job"] = {"cron": self.verification_cron, "enabled": True, "last_executed": None}
+                updated = True
+            if "withdraw_scheduled_job" not in user_data:
+                user_data["withdraw_scheduled_job"] = {"cron": self.default_withdraw_cron, "enabled": True, "last_executed": None}
+                updated = True
+            wjob = user_data.get("withdraw_scheduled_job", {})
+            if wjob.get("cron") == old_cron:
+                wjob["cron"] = new_cron
+                updated = True
+                logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_cron}")
+            if "last_withdraw_log" not in user_data:
+                user_data["last_withdraw_log"] = None
+                updated = True
+        if updated:
+            await self._save_all_data(all_data)
+            logger.info("✅ 数据迁移完成")
+        self.scheduler_running = True
+        self.scheduler_task = asyncio.create_task(self._scheduler_loop())
+        logger.info("✅ 高精度定时调度器已启动")
+
+    async def terminate(self):
+        logger.info("✅ 酷我插件已卸载")
+        self.scheduler_running = False
+        if self.scheduler_task:
+            self.scheduler_task.cancel()
+            try:
+                await self.scheduler_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("✅ 定时调度器已停止")
