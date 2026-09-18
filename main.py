@@ -8,6 +8,7 @@ import random
 import string
 import uuid
 import email.utils
+import threading
 from datetime import datetime, timedelta
 import requests
 from Crypto.Cipher import AES
@@ -179,7 +180,6 @@ def login_kuwo(username, password):
         return None
 
 def check_withdraw_today(loginUid, loginSid, target_date_str=None):
-    """检查指定日期（默认今天）是否已提现过；target_date_str 由调用方传入以支持'23-24点视为第二天'"""
     try:
         resp = requests.get(
             'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdrawDetails',
@@ -233,7 +233,8 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'
 
 FREQUENT_ERROR_KEYWORD = "频繁"
 
-def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, code, kwtxid, verification_id, q36, seq=1, max_extra_retries=3, retry_delay_ms=4000):
+def withdraw_confirm_once(session, phone, loginUid, loginSid, appUid, encrypted_phone, code, kwtxid, verification_id, q36, seq=1, max_extra_retries=3, retry_delay_ms=4000):
+    """session: requests.Session 实例，用于连接复用（复用 TCP 连接，省 DNS/TCP/TLS 握手）"""
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw'
     params = {'encry': '', 'type': 'highValue', 'quotaId': kwtxid, 'loginUid': loginUid, 'loginSid': loginSid,
               'appuid': appUid, 'source': 'kwplayer_ar_12.1.4.0_meizu.apk', 'version': '1', 'phone': encrypted_phone,
@@ -250,7 +251,7 @@ def withdraw_confirm_once(phone, loginUid, loginSid, appUid, encrypted_phone, co
     for attempt in range(1, max_extra_retries + 2):
         try:
             start = time.time()
-            resp = requests.get(url, headers=headers, params=params, timeout=5, verify=False)
+            resp = session.get(url, headers=headers, params=params, timeout=5, verify=False)
             elapsed_ms = (time.time() - start) * 1000
             result = resp.json() if resp.status_code == 200 else {}
             data = result.get('data', {})
@@ -308,6 +309,19 @@ class KuwoPlugin(Star):
         self._time_offset_updated_at = 0.0
         self._all_data_cache = None
         self._cron_cache = {}
+        # 【优化 1】预登录任务表：(user_id, phone) -> asyncio.Task
+        self._pre_login_tasks = {}
+        # 【优化 2】线程本地 Session（复用 TCP 连接）
+        self._session_local = threading.local()
+        # 【优化 3】预热节流
+        self._withdraw_warmed_at = 0.0
+
+    # ---------- 【优化 2】线程本地 Session ----------
+    def _get_thread_session(self) -> requests.Session:
+        """每个线程独享一个 requests.Session，复用 TCP 连接"""
+        if not hasattr(self._session_local, 'session'):
+            self._session_local.session = requests.Session()
+        return self._session_local.session
 
     # ---------- 数据持久化 ----------
     async def _retry_db_call(self, coro_func, *args, max_retries=5, base_delay=0.5, **kwargs):
@@ -435,7 +449,6 @@ class KuwoPlugin(Star):
 
     # ---------- 业务日期（23-24点视为第二天） ----------
     def _get_effective_today_str(self) -> str:
-        """业务'今天'：23:00-23:59 视为第二天；其他时间返回当天"""
         now = datetime.now()
         if now.hour >= 23:
             return (now + timedelta(days=1)).strftime('%Y-%m-%d')
@@ -493,11 +506,6 @@ class KuwoPlugin(Star):
         return "\n".join(lines)
 
     def _send_code_for_phone_sync(self, phone: str, password: str, check_today: bool = False) -> tuple:
-        """
-        同步：登录 → (可选)检查今日提现 → 发送验证码
-        check_today=False：手动获取验证码时跳过提现检查
-        check_today=True：定时任务时启用检查（用业务日期，23-24点视为第二天）
-        """
         try:
             login = login_kuwo(phone, password)
             if not login:
@@ -844,7 +852,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._verify_menu())
             return
         account_map = {acc["phone"]: acc["password"] for acc in accounts}
-        # 手动获取：check_today=False，不检查今日提现情况
         ordered = await self._send_codes_concurrently(phones_to_send, account_map, check_today=False)
         yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(ordered))
         self._update_state(user_id, menu='main', step=None)
@@ -882,7 +889,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
-    # ---------- 验证码输入 ----------
+    # ---------- 验证码输入（记录预登录任务） ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
         if getattr(event, '_code_phone_processed', False):
@@ -913,7 +920,9 @@ class KuwoPlugin(Star):
         if user_id not in self._code_cache_mem:
             self._code_cache_mem[user_id] = {}
         self._code_cache_mem[user_id][phone] = {"code": text, "expire": time.time() + 300}
-        asyncio.create_task(self._pre_login(user_id, phone))
+        # 【优化 1】记录预登录任务到 _pre_login_tasks
+        task = asyncio.create_task(self._pre_login(user_id, phone))
+        self._pre_login_tasks[(user_id, phone)] = task
         yield event.plain_result(f"✅ 验证码 {text} 已缓存（5分钟有效）")
         self._update_state(user_id, menu='main', step=None)
         self._schedule_timeout(user_id)
@@ -1066,6 +1075,9 @@ class KuwoPlugin(Star):
             logger.info(f"✅ 预登录成功并缓存: {phone}")
         except Exception as e:
             logger.error(f"预登录异常: {e}")
+        finally:
+            # 【优化 1】任务完成，从表中移除（由提现方负责清理）
+            pass
 
     # ---------- 核心提现 ----------
     async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None) -> str:
@@ -1096,23 +1108,45 @@ class KuwoPlugin(Star):
             code_info = codes.get(phone)
             if not code_info:
                 return (phone, None, "跳过（无验证码）", False)
+
+            # 【优化 1】优先等待正在跑的预登录任务
+            task_key = (user_id, phone)
+            pre_task = self._pre_login_tasks.get(task_key)
+            if pre_task is not None and not pre_task.done():
+                logger.info(f"⏳ {phone} 预登录任务未完成，等待最多 3 秒...")
+                try:
+                    await asyncio.wait_for(asyncio.shield(pre_task), timeout=3.0)
+                    logger.info(f"✅ {phone} 预登录任务已完成")
+                except asyncio.TimeoutError:
+                    logger.warning(f"⚠️ {phone} 预登录任务等待超时，继续走缓存/实时登录")
+                except Exception as e:
+                    logger.warning(f"⚠️ {phone} 等待预登录任务异常: {e}")
+            # 清理已完成的任务记录
+            if pre_task is not None and pre_task.done():
+                self._pre_login_tasks.pop(task_key, None)
+
+            # 检查预登录缓存
             cached = self._login_cache_mem.get(user_id, {}).get(phone)
             if cached and time.time() <= cached.get("expire", 0):
                 uid, sid, appuid = cached["uid"], cached["sid"], cached["appuid"]
                 logger.info(f"⚡ {phone} 命中预登录缓存，直接提现")
             else:
+                logger.info(f"🔐 {phone} 缓存未命中，走实时登录...")
                 login_result = await asyncio.to_thread(login_kuwo, phone, acc["password"])
                 if not login_result:
                     return (phone, None, "登录失败", False)
                 uid, sid, appuid, _ = login_result
+
+            # 提交到线程池执行提现请求（连接复用 Session）
+            session = self._get_thread_session()
             _, final_msg, is_success = await asyncio.to_thread(
-                withdraw_confirm_once, phone, uid, sid, appuid, encrypt_phone(phone), code_info["code"],
+                withdraw_confirm_once, session, phone, uid, sid, appuid, encrypt_phone(phone), code_info["code"],
                 self.kwtxid, self.verification_id, self.q36, 1, self.max_retries, self.retry_delay_ms)
             return (phone, final_msg, final_msg, is_success)
 
-        results = await asyncio.gather(*[withdraw_single(acc) for acc in valid_accounts])
-        success_count = sum(1 for r in results if r[3])
-        result_lines = [f"{'✅ 提现成功' if r[3] else '❌ 提现失败'} {r[0]}: {r[2]}" for r in results]
+ +        results = await asyncio.gather(*[withdraw_single(acc) "\ for acc in valid_accountns])
+        success_count = sum("1 for r in results if r[3])
+        result_lines + = [f"{'✅ 提现成功' if await r[3] else '❌ 提现失败'} {r[0]}: {r[2]}" for r in results]
         skipped_phones = [acc["phone"] for acc in accounts if acc["phone"] not in [r[0] for r in results]]
         for phone in skipped_phones:
             result_lines.append(f"⏭️ {phone}: 无有效验证码，已跳过")
@@ -1124,7 +1158,6 @@ class KuwoPlugin(Star):
                 self._code_cache_mem[user_id].pop(phone, None)
             if user_id in self._login_cache_mem:
                 self._login_cache_mem[user_id].pop(phone, None)
-        # 业务日期：23-24 点视为第二天
         today = self._get_effective_today_str()
         user_data.setdefault("daily_withdraw", {}).setdefault(today, {})
         for phone, _, _, ok in results:
@@ -1142,7 +1175,7 @@ class KuwoPlugin(Star):
 
     async def _do_withdraw(self, user_id: str, event: AstrMessageEvent) -> str:
         result = await self._process_withdraw(user_id, event)
-        return result + "\n" + await self._get_main_menu_text(user_id)
+        return result self._get_main_menu_text(user_id)
 
     # ---------- 定时任务执行 ----------
     async def _execute_withdraw_scheduled_job(self, user_id: str, preloaded_data: dict = None):
@@ -1228,7 +1261,6 @@ class KuwoPlugin(Star):
                     seen.add(acc['phone'])
                     unique_accounts.append(acc)
             account_map = {a['phone']: a['password'] for a in unique_accounts}
-            # 定时任务：check_today=True，检查今日提现（23-24 点视为第二天）
             ordered = await self._send_codes_concurrently([a['phone'] for a in unique_accounts], account_map, check_today=True)
             result_msg = ("🔹 手动执行结果：\n" if is_manual else "⏰ 定时获取验证码完成\n") + "\n".join(ordered)
             logger.info(result_msg)
@@ -1282,6 +1314,18 @@ class KuwoPlugin(Star):
     def _get_calibrated_now_ts(self) -> float:
         return time.time() + self._time_offset
 
+    # ---------- 【优化 3】预热连接 ----------
+    async def _warm_up_withdraw(self):
+        """提前对酷我提现域名做一次 HEAD，让 DNS 缓存和连接池处于"热"状态"""
+        try:
+            session = self._get_thread_session()
+            await asyncio.to_thread(
+                lambda: session.head('https://integralapi.kuwo.cn', timeout=3, verify=False)
+            )
+            logger.info("🔥 提现连接预热完成")
+        except Exception as e:
+            logger.debug(f"提现连接预热失败: {e}")
+
     # ---------- 调度器 ----------
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
         cron_dict = self._parse_cron(cron_expr)
@@ -1314,7 +1358,6 @@ class KuwoPlugin(Star):
                 if not events:
                     await asyncio.sleep(30)
                     continue
-                # 去重：同一用户同一类型只保留最早的一个
                 unique = {}
                 for nt, uid, typ, udata in events:
                     key = (uid, typ)
@@ -1322,7 +1365,6 @@ class KuwoPlugin(Star):
                         unique[key] = (nt, uid, typ, udata)
                 events = sorted(unique.values(), key=lambda x: x[0])
 
-                # 处理已到期任务（最近 30 秒内，避免陈旧事件堆积）
                 expired = [e for e in events if e[0] <= now and (now - e[0]).total_seconds() <= 30]
                 if expired:
                     for nt, uid, typ, udata in expired:
@@ -1333,22 +1375,23 @@ class KuwoPlugin(Star):
                             asyncio.create_task(self._execute_withdraw_scheduled_job(uid, preloaded_data=udata))
                     continue
 
-                # 只关注最近的一个事件（不再被更远的后续事件"拖住"）
                 next_time, next_uid, next_typ, next_udata = events[0]
                 delay = (next_time - now).total_seconds()
                 if delay > 30:
                     await asyncio.sleep(30)
                     continue
 
-                # 【最优方案】时间校准：仅当下一个事件（最近的）是 withdraw 时才触发
-                # 验证码用本地时钟即可，无需网络校准，省时省流量
+                # 时间校准：仅当下一个事件是 withdraw 时才触发
                 now_ts = time.time()
                 if next_typ == 'withdraw' and 3 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 300:
                     self._time_offset = await self._calibrate_time()
                     self._time_offset_updated_at = time.time()
 
-                # 精确等待最近这一个事件（next_time）到点
-                # code 用本地时间，withdraw 用校准后的标准时间
+                # 【优化 3】提现触发前 15 秒预热连接
+                if next_typ == 'withdraw' and 5 <= delay <= 15 and (now_ts - self._withdraw_warmed_at) > 60:
+                    asyncio.create_task(self._warm_up_withdraw())
+                    self._withdraw_warmed_at = time.time()
+
                 next_ts = next_time.timestamp()
                 while self.scheduler_running:
                     now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
@@ -1357,7 +1400,6 @@ class KuwoPlugin(Star):
                         break
                     await asyncio.sleep(min(r, 0.5))
 
-                # 触发所有"已到点"的事件（含可能同时到达的多个）
                 fired = []
                 for nt, uid, typ, udata in events:
                     now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
@@ -1659,7 +1701,7 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._admin_menu())
 
-    # ---------- 管理员发送验证码（手动 → 不检查） ----------
+    # ---------- 管理员发送验证码 ----------
     @filter.regex(r'^(all|\d+)$')
     async def handle_admin_send_code_select_user(self, event: AstrMessageEvent):
         if getattr(event, '_admin_choice_processed', False):
@@ -1694,7 +1736,6 @@ class KuwoPlugin(Star):
                 self._update_state(user_id, menu='admin', step=None)
                 yield event.plain_result(self._admin_menu())
                 return
-            # 管理员 all：check_today=False（按手动处理）
             task_results = await asyncio.gather(*[
                 asyncio.to_thread(self._send_code_for_phone_sync, p["phone"], p["password"], False)
                 for p in all_phones
@@ -1768,7 +1809,6 @@ class KuwoPlugin(Star):
             yield event.plain_result(self._admin_menu())
             return
         account_map = {acc["phone"]: acc["password"] for acc in accounts}
-        # 管理员指定账号：check_today=False（按手动处理）
         ordered = await self._send_codes_concurrently(phones_to_send, account_map, check_today=False)
         yield event.plain_result("📨 验证码发送结果：\n" + "\n".join(ordered))
         self._update_state(user_id, menu='admin', step=None)
@@ -1922,24 +1962,4 @@ class KuwoPlugin(Star):
             if wjob.get("cron") == old_cron:
                 wjob["cron"] = new_cron
                 updated = True
-                logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_cron}")
-            if "last_withdraw_log" not in user_data:
-                user_data["last_withdraw_log"] = None
-                updated = True
-        if updated:
-            await self._save_all_data(all_data)
-            logger.info("✅ 数据迁移完成")
-        self.scheduler_running = True
-        self.scheduler_task = asyncio.create_task(self._scheduler_loop())
-        logger.info("✅ 高精度定时调度器已启动")
-
-    async def terminate(self):
-        logger.info("✅ 酷我插件已卸载")
-        self.scheduler_running = False
-        if self.scheduler_task:
-            self.scheduler_task.cancel()
-            try:
-                await self.scheduler_task
-            except asyncio.CancelledError:
-                pass
-        logger.info("✅ 定时调度器已停止")
+                logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_cron
