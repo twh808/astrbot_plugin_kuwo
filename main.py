@@ -312,7 +312,6 @@ class KuwoPlugin(Star):
         self._session_local = threading.local()
         self._withdraw_warmed_at = 0.0
 
-    # ---------- 线程本地 Session ----------
     def _get_thread_session(self) -> requests.Session:
         if not hasattr(self._session_local, 'session'):
             self._session_local.session = requests.Session()
@@ -1036,19 +1035,21 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(await self._get_main_menu_text(user_id))
 
-    # ---------- 全局 q/Q ----------
+    # ---------- 全局 q/Q（含本次修复：取消后重建主菜单状态） ----------
     @filter.regex(r'^[qQ]$')
     async def handle_global_q(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') or state.get('menu'):
             self._clear_state(user_id)
+            # 【修复】清除后重建状态为主菜单，保证取消后仍能继续操作
+            self._update_state(user_id, menu='main', step=None, umo=event.unified_msg_origin)
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已取消当前操作，返回主菜单")
             yield event.plain_result(await self._get_main_menu_text(user_id))
         else:
             yield event.plain_result("👋 已退出")
-
+            
     # ---------- 预登录 ----------
     async def _pre_login(self, user_id: str, phone: str):
         try:
@@ -1068,7 +1069,8 @@ class KuwoPlugin(Star):
             logger.info(f"✅ 预登录成功并缓存: {phone}")
         except Exception as e:
             logger.error(f"预登录异常: {e}")
-            # ---------- 立即获取验证码：展示账号列表 ----------
+
+    # ---------- 立即获取验证码：展示账号列表 ----------
     async def _do_send_code(self, user_id: str) -> str:
         logger.info(f"🟢 _do_send_code 被调用，用户 {user_id}")
         user_data = await self._load_data(user_id)
