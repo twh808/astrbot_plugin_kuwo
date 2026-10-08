@@ -9,6 +9,7 @@ import string
 import uuid
 import email.utils
 import threading
+import concurrent.futures
 from datetime import datetime, timedelta
 import requests
 from Crypto.Cipher import AES
@@ -311,11 +312,19 @@ class KuwoPlugin(Star):
         self._pre_login_tasks = {}
         self._session_local = threading.local()
         self._withdraw_warmed_at = 0.0
+        # 【新增】共享 session，配置大连接池供预热复用
+        self._shared_session = requests.Session()
+        _adapter = requests.adapters.HTTPAdapter(
+            pool_connections=20,
+            pool_maxsize=20,
+            max_retries=0,
+        )
+        self._shared_session.mount('https://', _adapter)
+        self._shared_session.mount('http://', _adapter)
 
     def _get_thread_session(self) -> requests.Session:
-        if not hasattr(self._session_local, 'session'):
-            self._session_local.session = requests.Session()
-        return self._session_local.session
+        # 【改】返回共享 session，保证预热连接能被提现请求复用
+        return self._shared_session
 
     # ---------- 数据持久化 ----------
     async def _retry_db_call(self, coro_func, *args, max_retries=5, base_delay=0.5, **kwargs):
@@ -852,10 +861,9 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(await self._get_main_menu_text(user_id))
 
-    # ---------- 提交验证码选择账号（本次修复：用 event 标记代替 trigger_msg） ----------
+    # ---------- 提交验证码选择账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
-        # 【修复】同一条消息已被 handle_main_choice 处理过则跳过
         if getattr(event, '_main_choice_processed', False):
             return
         user_id = event.get_sender_id()
@@ -971,10 +979,9 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._account_menu())
 
-    # ---------- 解绑选择序号（本次修复：用 event 标记代替 trigger_msg） ----------
+    # ---------- 解绑选择序号 ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
-        # 【修复】同一条消息已被 handle_account_choice 处理过则跳过
         if getattr(event, '_account_choice_processed', False):
             return
         user_id = event.get_sender_id()
@@ -1040,14 +1047,13 @@ class KuwoPlugin(Star):
         self._update_state(user_id, menu='main', step=None)
         yield event.plain_result(await self._get_main_menu_text(user_id))
 
-    # ---------- 全局 q/Q（含本次修复：取消后重建主菜单状态） ----------
+    # ---------- 全局 q/Q ----------
     @filter.regex(r'^[qQ]$')
     async def handle_global_q(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') or state.get('menu'):
             self._clear_state(user_id)
-            # 【修复】清除后重建状态为主菜单，保证取消后仍能继续操作
             self._update_state(user_id, menu='main', step=None, umo=event.unified_msg_origin)
             self._schedule_timeout(user_id)
             yield event.plain_result("👋 已取消当前操作，返回主菜单")
@@ -1306,14 +1312,24 @@ class KuwoPlugin(Star):
     def _get_calibrated_now_ts(self) -> float:
         return time.time() + self._time_offset
 
-    # ---------- 提现连接预热 ----------
-    async def _warm_up_withdraw(self):
+    # ---------- 提现连接预热（参考酷狗脚本 preheat_pool）----------
+    async def _warm_up_withdraw(self, n: int = 6):
+        """并发建立 n 条 TLS 连接，让提现第一发零握手"""
         try:
-            session = self._get_thread_session()
-            await asyncio.to_thread(
-                lambda: session.head('https://integralapi.kuwo.cn', timeout=3, verify=False)
-            )
-            logger.info("🔥 提现连接预热完成")
+            session = self._shared_session
+
+            def _one():
+                try:
+                    session.head('https://integralapi.kuwo.cn/', timeout=3, verify=False)
+                except Exception:
+                    pass
+
+            def _do_warm():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+                    list(ex.map(lambda _: _one(), range(n)))
+
+            await asyncio.to_thread(_do_warm)
+            logger.info(f"🔥 提现连接预热完成（{n} 条）")
         except Exception as e:
             logger.debug(f"提现连接预热失败: {e}")
 
@@ -1398,7 +1414,8 @@ class KuwoPlugin(Star):
                     self._time_offset = await self._calibrate_time()
                     self._time_offset_updated_at = time.time()
 
-                if next_typ == 'withdraw' and 5 <= delay <= 15 and (now_ts - self._withdraw_warmed_at) > 60:
+                # 【改】预热窗口放宽到 1~20 秒，每 3 秒一次
+                if next_typ == 'withdraw' and 1 <= delay <= 20 and (now_ts - self._withdraw_warmed_at) > 3:
                     asyncio.create_task(self._warm_up_withdraw())
                     self._withdraw_warmed_at = time.time()
 
