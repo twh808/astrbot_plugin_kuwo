@@ -597,7 +597,7 @@ class KuwoPlugin(Star):
             prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号，输入 0 取消："
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-            self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
+            self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"]})
         elif text == "4":
             self._update_state(user_id, menu='withdraw', step=None)
             self._schedule_timeout(user_id)
@@ -608,6 +608,7 @@ class KuwoPlugin(Star):
     async def handle_account_choice(self, event: AstrMessageEvent):
         if getattr(event, '_main_choice_processed', False):
             return
+        setattr(event, '_account_choice_processed', True)
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('menu') != 'account' or state.get('step'):
@@ -635,7 +636,7 @@ class KuwoPlugin(Star):
             prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1），输入 0 取消："
             self._schedule_timeout(user_id)
             yield event.plain_result(prompt)
-            self._update_state(user_id, step='waiting_delete', tmp_data={'accounts': user_data["accounts"], 'trigger_msg': text})
+            self._update_state(user_id, step='waiting_delete', tmp_data={'accounts': user_data["accounts"]})
         elif text == "3":
             user_data = await self._load_data(user_id)
             if user_data["accounts"]:
@@ -851,15 +852,17 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(await self._get_main_menu_text(user_id))
 
+    # ---------- 提交验证码选择账号（本次修复：用 event 标记代替 trigger_msg） ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
+        # 【修复】同一条消息已被 handle_main_choice 处理过则跳过
+        if getattr(event, '_main_choice_processed', False):
+            return
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_code_phone':
             return
         text = event.message_str.strip()
-        if text == state.get('tmp_data', {}).get('trigger_msg'):
-            return
         if text == "0":
             self._update_state(user_id, menu='main', step=None)
             self._schedule_timeout(user_id)
@@ -968,15 +971,17 @@ class KuwoPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(self._account_menu())
 
+    # ---------- 解绑选择序号（本次修复：用 event 标记代替 trigger_msg） ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
+        # 【修复】同一条消息已被 handle_account_choice 处理过则跳过
+        if getattr(event, '_account_choice_processed', False):
+            return
         user_id = event.get_sender_id()
         state = self._get_state(user_id)
         if state.get('step') != 'waiting_delete':
             return
         text = event.message_str.strip()
-        if text == state.get('tmp_data', {}).get('trigger_msg'):
-            return
         if text == "0":
             self._update_state(user_id, menu='account', step=None)
             self._schedule_timeout(user_id)
