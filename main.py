@@ -20,6 +20,8 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
+VERSION = "2.7.0"
+
 # ======================================================================
 # 1. 加密常量
 # ======================================================================
@@ -312,6 +314,7 @@ class KuwoPlugin(Star):
         self._pre_login_tasks = {}
         self._session_local = threading.local()
         self._withdraw_warmed_at = 0.0
+        self._prelogin_task_key = None   # 【新增】提现预登录任务标记，每个整点只登录一次
         # 【新增】共享 session，配置大连接池供预热复用
         self._shared_session = requests.Session()
         _adapter = requests.adapters.HTTPAdapter(
@@ -1060,7 +1063,7 @@ class KuwoPlugin(Star):
             yield event.plain_result(await self._get_main_menu_text(user_id))
         else:
             yield event.plain_result("👋 已退出")
-            
+
     # ---------- 预登录 ----------
     async def _pre_login(self, user_id: str, phone: str):
         try:
@@ -1312,7 +1315,7 @@ class KuwoPlugin(Star):
     def _get_calibrated_now_ts(self) -> float:
         return time.time() + self._time_offset
 
-    # ---------- 提现连接预热（参考酷狗脚本 preheat_pool）----------
+    # ---------- 提现连接预热 ----------
     async def _warm_up_withdraw(self, n: int = 6):
         """并发建立 n 条 TLS 连接，让提现第一发零握手"""
         try:
@@ -1332,6 +1335,37 @@ class KuwoPlugin(Star):
             logger.info(f"🔥 提现连接预热完成（{n} 条）")
         except Exception as e:
             logger.debug(f"提现连接预热失败: {e}")
+
+    # ---------- 【新增】提现预登录 ----------
+    async def _pre_login_for_withdraw(self, user_id: str, user_data: dict):
+        """整点前提现预登录：并发登录所有目标账号，缓存凭证。
+        不依赖验证码——验证码只是提现参数，59:58 提交也能用。
+        """
+        accounts = user_data.get("accounts", [])
+        if not accounts:
+            return
+        auth_limit = user_data.get('auth_limit', 0)
+        if auth_limit == 0:
+            logger.info(f"⏭️ 用户 {user_id} 授权次数为0，跳过提现预登录")
+            return
+        target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
+
+        async def _login_one(acc):
+            phone = acc["phone"]
+            try:
+                result = await asyncio.to_thread(login_kuwo, phone, acc["password"])
+                if result:
+                    uid, sid, appuid, _ = result
+                    self._login_cache_mem.setdefault(user_id, {})[phone] = {
+                        "uid": uid, "sid": sid, "appuid": appuid, "expire": time.time() + 600}
+                    logger.info(f"⚡ 提现预登录成功: {phone}")
+                else:
+                    logger.warning(f"⚠️ 提现预登录失败: {phone}")
+            except Exception as e:
+                logger.warning(f"⚠️ 提现预登录异常 {phone}: {e}")
+
+        await asyncio.gather(*[_login_one(acc) for acc in target_accounts])
+        logger.info(f"✅ 用户 {user_id} 提现预登录完成（{len(target_accounts)} 个账号）")
 
     # ---------- 调度器 ----------
     def _get_next_match_time(self, cron_expr: str, from_dt: datetime):
@@ -1414,10 +1448,18 @@ class KuwoPlugin(Star):
                     self._time_offset = await self._calibrate_time()
                     self._time_offset_updated_at = time.time()
 
-                # 【改】预热窗口放宽到 1~20 秒，每 3 秒一次
+                # 预热窗口放宽到 1~20 秒，每 3 秒一次
                 if next_typ == 'withdraw' and 1 <= delay <= 20 and (now_ts - self._withdraw_warmed_at) > 3:
                     asyncio.create_task(self._warm_up_withdraw())
                     self._withdraw_warmed_at = time.time()
+
+                # 【新增】整点前 5~30 秒：预登录所有目标账号（每个提现任务只做一次）
+                if next_typ == 'withdraw' and 5 <= delay <= 30:
+                    task_key = f"{next_uid}_{next_time.strftime('%Y%m%d%H%M')}"
+                    if self._prelogin_task_key != task_key:
+                        self._prelogin_task_key = task_key
+                        logger.info(f"🔐 触发提现预登录: 用户 {next_uid}, 距整点 {delay:.1f}s")
+                        asyncio.create_task(self._pre_login_for_withdraw(next_uid, next_udata))
 
                 next_ts = next_time.timestamp()
                 while self.scheduler_running:
