@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import os
 import asyncio
 import time
 import re
@@ -21,6 +22,9 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 VERSION = "2.7.0"
+
+# 提现请求到达服务器 = 整点后多少秒；默认 0 = 整点立马发送，不等待
+ARRIVE_AFTER = float(os.getenv('ARRIVE_AFTER', '0'))
 
 # ======================================================================
 # 1. 加密常量
@@ -1280,36 +1284,37 @@ class KuwoPlugin(Star):
         else:
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
-    # ---------- 时间校准 ----------
+    # ---------- 时间校准（酷我服务器时间） ----------
     async def _calibrate_time(self, samples=2):
-        sources = ["https://www.baidu.com", "https://www.qq.com", "https://www.taobao.com", "https://www.jd.com"][:samples]
+        """用酷我 newUserSignList 返回的 curTime 校准本机时间，返回 offset（本机时间 + offset = 服务器时间）。"""
+        time_probe_url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newUserSignList'
         samples_list = []
-        for url in sources:
+        for _ in range(samples):
             try:
                 t0 = time.time()
-                resp = await asyncio.to_thread(requests.head, url, timeout=3, allow_redirects=False)
+                resp = await asyncio.to_thread(requests.get, time_probe_url, timeout=5, verify=False)
                 t1 = time.time()
-                date_header = resp.headers.get('Date')
-                if not date_header:
+                if resp.status_code != 200:
                     continue
-                server_dt = email.utils.parsedate_to_datetime(date_header)
-                if server_dt is None:
+                data = resp.json()
+                ct = data.get('curTime')
+                if ct is None:
                     continue
+                server_sec = float(ct)
+                if server_sec > 1e12:          # 毫秒时间戳
+                    server_sec /= 1000.0
                 rtt = t1 - t0
-                offset = (server_dt.timestamp() + rtt / 2) - t1
+                offset = server_sec - (t1 - rtt / 2)
                 samples_list.append((rtt, offset))
             except Exception as e:
-                logger.debug(f"时间源 {url} 校准失败: {e}")
+                logger.debug(f"酷我时间校准失败: {e}")
         if not samples_list:
-            logger.warning("⚠️ 时间校准失败：所有时间源均不可用，使用本地时间")
+            logger.warning("⚠️ 酷我时间校准失败：无法获取服务器时间，使用本地时间")
             return 0.0
         samples_list.sort(key=lambda x: x[0])
         best_rtt, best_offset = samples_list[0]
-        if abs(best_offset) > 5.0:
-            logger.warning(f"⚠️ 时间校准结果异常（偏移 {best_offset*1000:+.0f}ms > 5s），改用本地时间")
-            return 0.0
         rtts = [f"{r*1000:.0f}ms" for r, _ in samples_list]
-        logger.info(f"⏱️ 时间校准完成：偏移 {best_offset*1000:+.0f}ms (最优RTT {best_rtt*1000:.0f}ms, 所有RTT [{', '.join(rtts)}])")
+        logger.info(f"⏱️ 酷我时间校准完成：偏移 {best_offset*1000:+.0f}ms (最优RTT {best_rtt*1000:.0f}ms, 所有RTT [{', '.join(rtts)}])")
         return best_offset
 
     def _get_calibrated_now_ts(self) -> float:
@@ -1462,9 +1467,10 @@ class KuwoPlugin(Star):
                         asyncio.create_task(self._pre_login_for_withdraw(next_uid, next_udata))
 
                 next_ts = next_time.timestamp()
+                _arrive_next = ARRIVE_AFTER if next_typ == 'withdraw' else 0.0
                 while self.scheduler_running:
                     now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
-                    r = next_ts - now_ref
+                    r = (next_ts + _arrive_next) - now_ref
                     if r <= 0.005:
                         break
                     await asyncio.sleep(min(r, 0.5))
@@ -1472,7 +1478,8 @@ class KuwoPlugin(Star):
                 fired = []
                 for nt, uid, typ, udata in events:
                     now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
-                    if now_ref >= nt.timestamp() - 0.005:
+                    _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
+                    if now_ref >= nt.timestamp() + _arrive - 0.005:
                         fired.append((nt, uid, typ, udata))
 
                 if not fired:
