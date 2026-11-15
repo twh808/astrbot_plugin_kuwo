@@ -313,6 +313,8 @@ class KuwoPlugin(Star):
         self._login_cache_mem = {}
         self._time_offset = 0.0
         self._time_offset_updated_at = 0.0
+        self._rtt = 0.0
+        self._fired_marks = set()
         self._all_data_cache = None
         self._cron_cache = {}
         self._pre_login_tasks = {}
@@ -1285,8 +1287,9 @@ class KuwoPlugin(Star):
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
     # ---------- 时间校准（酷我服务器时间） ----------
-    async def _calibrate_time(self, samples=2):
-        """用酷我 newUserSignList 返回的 curTime 校准本机时间，返回 offset（本机时间 + offset = 服务器时间）。"""
+    async def _calibrate_time(self, samples=10):
+        """用酷我 newUserSignList 返回的 curTime 校准本机时间，返回 (offset, rtt)（本机时间 + offset = 服务器时间）。
+        取 RTT 最小的样本；样本数越大越稳。"""
         time_probe_url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newUserSignList'
         samples_list = []
         for _ in range(samples):
@@ -1310,12 +1313,12 @@ class KuwoPlugin(Star):
                 logger.debug(f"酷我时间校准失败: {e}")
         if not samples_list:
             logger.warning("⚠️ 酷我时间校准失败：无法获取服务器时间，使用本地时间")
-            return 0.0
+            return 0.0, 0.0
         samples_list.sort(key=lambda x: x[0])
         best_rtt, best_offset = samples_list[0]
         rtts = [f"{r*1000:.0f}ms" for r, _ in samples_list]
-        logger.info(f"⏱️ 酷我时间校准完成：偏移 {best_offset*1000:+.0f}ms (最优RTT {best_rtt*1000:.0f}ms, 所有RTT [{', '.join(rtts)}])")
-        return best_offset
+        logger.info(f"⏱️ 酷我时间校准完成：偏移 {best_offset*1000:+.0f}ms (最优RTT {best_rtt*1000:.0f}ms/{len(samples_list)}样本, 所有RTT [{', '.join(rtts)}])")
+        return best_offset, best_rtt
 
     def _get_calibrated_now_ts(self) -> float:
         return time.time() + self._time_offset
@@ -1409,6 +1412,7 @@ class KuwoPlugin(Star):
         while self.scheduler_running:
             try:
                 now = datetime.now()
+                now_srv = datetime.fromtimestamp(time.time() + self._time_offset)
                 all_data = await self._load_all_data()
                 events = []
                 for user_id, user_data in all_data.items():
@@ -1419,7 +1423,8 @@ class KuwoPlugin(Star):
                             events.append((nt, user_id, 'code', user_data))
                     wjob = user_data.get('withdraw_scheduled_job', {})
                     if wjob.get('cron') and wjob.get('enabled'):
-                        nt = self._get_next_match_time(wjob['cron'], now)
+                        # withdraw 用服务器时间算下一场，避免本地/服务器时间差导致过点后重复触发
+                        nt = self._get_next_match_time(wjob['cron'], now_srv)
                         if nt:
                             events.append((nt, user_id, 'withdraw', user_data))
                 if not events:
@@ -1432,9 +1437,21 @@ class KuwoPlugin(Star):
                         unique[key] = (nt, uid, typ, udata)
                 events = sorted(unique.values(), key=lambda x: x[0])
 
-                expired = [e for e in events if e[0] <= now and (now - e[0]).total_seconds() <= 30]
+                # 清理 1 小时前的触发标记，避免集合无限增长
+                _now_epoch = time.time()
+                self._fired_marks = {m for m in self._fired_marks if _now_epoch - m[2] < 3600}
+
+                expired = []
+                for e in events:
+                    _ref_due = now_srv if e[2] == 'withdraw' else now
+                    if e[0] <= _ref_due and (_ref_due - e[0]).total_seconds() <= 30:
+                        expired.append(e)
                 if expired:
                     for nt, uid, typ, udata in expired:
+                        ident = (uid, typ, int(nt.timestamp()))
+                        if ident in self._fired_marks:
+                            continue
+                        self._fired_marks.add(ident)
                         logger.info(f"⏰ 触发已到期任务: 用户 {uid}, 类型 {typ}, 原定 {nt.strftime('%H:%M:%S.%f')}")
                         if typ == 'code':
                             asyncio.create_task(self._execute_scheduled_job(uid, preloaded_data=udata))
@@ -1443,14 +1460,15 @@ class KuwoPlugin(Star):
                     continue
 
                 next_time, next_uid, next_typ, next_udata = events[0]
-                delay = (next_time - now).total_seconds()
+                _now_for_next = now_srv if next_typ == 'withdraw' else now
+                delay = (next_time - _now_for_next).total_seconds()
                 if delay > 30:
                     await asyncio.sleep(30)
                     continue
 
                 now_ts = time.time()
-                if next_typ == 'withdraw' and 3 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 300:
-                    self._time_offset = await self._calibrate_time()
+                if next_typ == 'withdraw' and 1 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 120:
+                    self._time_offset, self._rtt = await self._calibrate_time()
                     self._time_offset_updated_at = time.time()
 
                 # 预热窗口放宽到 1~20 秒，每 3 秒一次
@@ -1468,18 +1486,29 @@ class KuwoPlugin(Star):
 
                 next_ts = next_time.timestamp()
                 _arrive_next = ARRIVE_AFTER if next_typ == 'withdraw' else 0.0
+                # 发令时刻提前 RTT/2，让请求到达服务器时正好整点（与酷狗脚本同款）
+                fire_target = next_ts + _arrive_next - (self._rtt / 2 if next_typ == 'withdraw' else 0.0)
                 while self.scheduler_running:
                     now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
-                    r = (next_ts + _arrive_next) - now_ref
-                    if r <= 0.005:
+                    r = fire_target - now_ref
+                    if r <= 0.0005:
                         break
-                    await asyncio.sleep(min(r, 0.5))
+                    if r > 0.05:
+                        await asyncio.sleep(min(r - 0.03, 0.5))
+                    else:
+                        # 最后 50ms 用 sleep(0) 高频重试，避免 Windows asyncio.sleep 精度差导致晚 15~80ms
+                        await asyncio.sleep(0)
 
                 fired = []
                 for nt, uid, typ, udata in events:
                     now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
                     _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
-                    if now_ref >= nt.timestamp() + _arrive - 0.005:
+                    _rr = (self._rtt / 2) if typ == 'withdraw' else 0.0
+                    ident = (uid, typ, int(nt.timestamp()))
+                    if now_ref >= nt.timestamp() + _arrive - _rr - 0.005:
+                        if ident in self._fired_marks:
+                            continue
+                        self._fired_marks.add(ident)
                         fired.append((nt, uid, typ, udata))
 
                 if not fired:
