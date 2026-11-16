@@ -300,6 +300,9 @@ class KuwoPlugin(Star):
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
         self.quota_id = self.config.get('quota_id', "60004")
         self.admin_qq = self.config.get('admin_qq', [])
+        # 触发→真正发出提现请求的实测开销（秒）：每场独立实测，不和上一场混合
+        self._send_overhead = 0.0
+        self._overhead_probed_key = None
 
         self.states = {}
         self.TIMEOUT = self.timeout
@@ -1112,7 +1115,7 @@ class KuwoPlugin(Star):
         return "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
 
     # ---------- 核心提现 ----------
-    async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None) -> str:
+    async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None, trigger_ts: float = None, dry_run: bool = False) -> str:
         user_data = await self._load_data(user_id)
         if not user_data["accounts"]:
             return "❌ 请先绑定账号"
@@ -1135,6 +1138,8 @@ class KuwoPlugin(Star):
         if not valid_accounts:
             return "❌ 所有账号均未配置有效验证码，请先获取验证码"
 
+        _send_samples = []
+
         async def withdraw_single(acc):
             phone = acc["phone"]
             code_info = codes.get(phone)
@@ -1142,7 +1147,7 @@ class KuwoPlugin(Star):
                 return (phone, None, "跳过（无验证码）", False)
             task_key = (user_id, phone)
             pre_task = self._pre_login_tasks.get(task_key)
-            if pre_task is not None and not pre_task.done():
+            if (not dry_run) and pre_task is not None and not pre_task.done():
                 logger.info(f"⏳ {phone} 预登录任务未完成，等待最多 3 秒...")
                 try:
                     await asyncio.wait_for(asyncio.shield(pre_task), timeout=3.0)
@@ -1158,6 +1163,11 @@ class KuwoPlugin(Star):
             if cached and time.time() <= cached.get("expire", 0):
                 uid, sid, appuid = cached["uid"], cached["sid"], cached["appuid"]
                 logger.info(f"⚡ {phone} 命中预登录缓存，直接提现")
+            elif dry_run:
+                # dry-run 不真登录，只测到这一步的耗时
+                if trigger_ts:
+                    _send_samples.append(time.time() - trigger_ts)
+                return (phone, None, "dry-run", False)
             else:
                 logger.info(f"🔐 {phone} 缓存未命中，走实时登录...")
                 login_result = await asyncio.to_thread(login_kuwo, phone, acc["password"])
@@ -1165,6 +1175,12 @@ class KuwoPlugin(Star):
                     return (phone, None, "登录失败", False)
                 uid, sid, appuid, _ = login_result
 
+            if trigger_ts:
+                # 记录"触发→此刻真正要发请求"的耗时，供下一场自动提前
+                _send_samples.append(time.time() - trigger_ts)
+            if dry_run:
+                # 每场触发前的空跑：只测预处理耗时，不发提现请求
+                return (phone, None, "dry-run", False)
             session = self._get_thread_session()
             _, final_msg, is_success = await asyncio.to_thread(
                 withdraw_confirm_once, session, phone, uid, sid, appuid, encrypt_phone(phone), code_info["code"],
@@ -1172,6 +1188,8 @@ class KuwoPlugin(Star):
             return (phone, final_msg, final_msg, is_success)
 
         results = await asyncio.gather(*[withdraw_single(acc) for acc in valid_accounts])
+        if _send_samples:
+            self._note_send_overhead(sum(_send_samples) / len(_send_samples))
         success_count = sum(1 for r in results if r[3])
         result_lines = [f"{'✅ 提现成功' if r[3] else '❌ 提现失败'} {r[0]}: {r[2]}" for r in results]
         skipped_phones = [acc["phone"] for acc in accounts if acc["phone"] not in [r[0] for r in results]]
@@ -1197,8 +1215,25 @@ class KuwoPlugin(Star):
                    f"━━━━━━━━━━━━\n")
         full_result = summary + "\n".join(result_lines)
         user_data["last_withdraw_log"] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "result": full_result}
-        await self._save_data(user_id, user_data)
+        if not dry_run:
+            await self._save_data(user_id, user_data)
         return full_result
+
+    def _note_send_overhead(self, overhead: float):
+        """每场独立实测发送开销，直接覆盖旧值，不和上一场混合。"""
+        if overhead <= 0 or overhead > 0.2:
+            return
+        self._send_overhead = min(max(overhead, 0.0), 0.08)
+
+    async def _probe_send_overhead(self, user_id: str):
+        """每场触发前空跑一遍提现预处理路径（不发 HTTP），测本场"任务开始→发请求"的本地开销。"""
+        self._send_overhead = 0.0  # 每场重置，不和上一场混合
+        try:
+            _t0 = time.time()
+            await self._process_withdraw(user_id, None, trigger_ts=_t0, dry_run=True)
+            logger.info(f"⏱️ 本场发送开销实测: {self._send_overhead*1000:.1f}ms")
+        except Exception as e:
+            logger.debug(f"发送开销探测失败: {e}")
 
     async def _do_withdraw(self, user_id: str, event: AstrMessageEvent) -> str:
         result = await self._process_withdraw(user_id, event)
@@ -1206,6 +1241,7 @@ class KuwoPlugin(Star):
 
     # ---------- 定时任务执行 ----------
     async def _execute_withdraw_scheduled_job(self, user_id: str, preloaded_data: dict = None):
+        _job_start = time.time()
         lock_key = f"{user_id}_withdraw"
         now = datetime.now()
         last = self._last_trigger_time.get(lock_key)
@@ -1221,8 +1257,9 @@ class KuwoPlugin(Star):
                 logger.info(f"用户 {user_id} 提现定时任务未启用或无规则")
                 return
             user_data['withdraw_scheduled_job']['last_executed'] = now.strftime('%Y-%m-%d %H:%M:%S')
+            # 提现请求优先打出去：写库挪到提现完成后再做，避免占用整点前关键的那几十毫秒
+            result = await self._process_withdraw(user_id, None, trigger_ts=_job_start)
             await self._save_data(user_id, user_data)
-            result = await self._process_withdraw(user_id, None)
             state = self._get_state(user_id)
             umo = state.get('umo')
             if umo:
@@ -1484,10 +1521,22 @@ class KuwoPlugin(Star):
                         logger.info(f"🔐 触发提现预登录: 用户 {next_uid}, 距整点 {delay:.1f}s")
                         asyncio.create_task(self._pre_login_for_withdraw(next_uid, next_udata))
 
+                # 每场触发前空跑一次，测本场发送开销（不和上一场混）
+                if next_typ == 'withdraw' and 5 <= delay <= 20:
+                    _probe_key = next_time.strftime('%Y%m%d%H%M')
+                    if self._overhead_probed_key != _probe_key:
+                        self._overhead_probed_key = _probe_key
+                        for _nt2, _uid2, _typ2, _udata2 in events:
+                            if _typ2 == 'withdraw' and (_udata2.get('accounts') or []):
+                                await self._probe_send_overhead(_uid2)
+                                if self._send_overhead > 0:
+                                    break
+
                 next_ts = next_time.timestamp()
                 _arrive_next = ARRIVE_AFTER if next_typ == 'withdraw' else 0.0
-                # 发令时刻提前 RTT/2，让请求到达服务器时正好整点（与酷狗脚本同款）
-                fire_target = next_ts + _arrive_next - (self._rtt / 2 if next_typ == 'withdraw' else 0.0)
+                # 发令时刻提前 RTT/2，再减去"触发→真正发出请求"的实测开销，让请求到达服务器时正好整点
+                _overhead = self._send_overhead if next_typ == 'withdraw' else 0.0
+                fire_target = next_ts + _arrive_next - (self._rtt / 2 if next_typ == 'withdraw' else 0.0) - _overhead
                 while self.scheduler_running:
                     now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
                     r = fire_target - now_ref
@@ -1505,7 +1554,7 @@ class KuwoPlugin(Star):
                     _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
                     _rr = (self._rtt / 2) if typ == 'withdraw' else 0.0
                     ident = (uid, typ, int(nt.timestamp()))
-                    if now_ref >= nt.timestamp() + _arrive - _rr - 0.005:
+                    if now_ref >= nt.timestamp() + _arrive - _rr - _overhead - 0.005:
                         if ident in self._fired_marks:
                             continue
                         self._fired_marks.add(ident)
