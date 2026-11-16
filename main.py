@@ -303,6 +303,8 @@ class KuwoPlugin(Star):
         # 触发→真正发出提现请求的实测开销（秒）：每场独立实测，不和上一场混合
         self._send_overhead = 0.0
         self._overhead_probed_key = None
+        # 服务器当天已提标记（预登录时查 withdrawDetails，提现时跳过，避免"请求过于频繁"）
+        self._today_withdrawn = {}
 
         self.states = {}
         self.TIMEOUT = self.timeout
@@ -1142,6 +1144,9 @@ class KuwoPlugin(Star):
 
         async def withdraw_single(acc):
             phone = acc["phone"]
+            # 服务器当天记录已提：整点不再请求，避免"请求过于频繁"
+            if phone in self._today_withdrawn.get(user_id, set()):
+                return (phone, "今日已提现（服务器），跳过", "今日已提现（服务器），跳过", False)
             code_info = codes.get(phone)
             if not code_info:
                 return (phone, None, "跳过（无验证码）", False)
@@ -1395,6 +1400,9 @@ class KuwoPlugin(Star):
             return
         target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
 
+        # 每场重置"服务器已提"标记，不和上一场混
+        self._today_withdrawn.pop(user_id, None)
+
         async def _login_one(acc):
             phone = acc["phone"]
             try:
@@ -1404,6 +1412,11 @@ class KuwoPlugin(Star):
                     self._login_cache_mem.setdefault(user_id, {})[phone] = {
                         "uid": uid, "sid": sid, "appuid": appuid, "expire": time.time() + 600}
                     logger.info(f"⚡ 提现预登录成功: {phone}")
+                    # 顺手查服务器当天记录：今天已提就标记，整点不再白打 4 次
+                    today = self._get_effective_today_str()
+                    if await asyncio.to_thread(check_withdraw_today, uid, sid, today):
+                        self._today_withdrawn.setdefault(user_id, set()).add(phone)
+                        logger.info(f"⏭️ {phone} 服务器记录显示今日已提，本场跳过")
                 else:
                     logger.warning(f"⚠️ 提现预登录失败: {phone}")
             except Exception as e:
