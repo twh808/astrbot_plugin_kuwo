@@ -1512,11 +1512,15 @@ class KuwoPlugin(Star):
                         fired.append((nt, uid, typ, udata))
 
                 if not fired:
-                    logger.warning(
-                        f"⚠️ 等待结束但无任务触发：next={next_time.strftime('%H:%M:%S.%f')}, "
-                        f"now={datetime.now().strftime('%H:%M:%S.%f')}, "
-                        f"typ={next_typ}, offset={self._time_offset*1000:+.0f}ms"
-                    )
+                    # 本场已提前 RTT/2 触发过（fired_marks 命中），但服务器时间还没到整点，
+                    # 下一轮 _get_next_match_time 仍会返回同一整点。这里睡到整点过去再继续：
+                    # 既不空转刷屏，也把事件循环让给刚创建的提现任务，避免请求被推迟发出。
+                    _wait_left = next_ts - (time.time() + self._time_offset)
+                    if _wait_left > 0:
+                        await asyncio.sleep(min(_wait_left + 0.002, 0.5))
+                    else:
+                        await asyncio.sleep(0.05)
+                    continue
 
                 for nt, uid, typ, udata in fired:
                     logger.info(
