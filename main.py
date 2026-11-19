@@ -212,12 +212,12 @@ def check_withdraw_today(loginUid, loginSid, target_date_str=None):
     except Exception:
         return False
 
-def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'):
+def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002'):
     try:
         resp = requests.get(
             'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode',
             params={'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone, 'appuid': appUid,
-                    'apiv': '9', 'terminal': '1', 'quotaId': quota_id, 'type': 'blindBox'},
+                    'apiv': '9', 'terminal': '1', 'quotaId': quota_id, 'type': 'highValue'},
             headers={'Host': 'integralapi.kuwo.cn', 'Connection': 'keep-alive',
                      'Accept': 'application/json, text/plain, */*',
                      'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro; wv) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Mobile Safari/537.36 kuwopage',
@@ -290,7 +290,7 @@ class KuwoPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
-        self.verification_cron = self.config.get('verification_cron', "15 55 8,12,16,19 * * *")
+        self.verification_cron = self.config.get('verification_cron', "15 57 8,12,16,19 * * *")
         self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 0,9,13,17,20 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
@@ -298,7 +298,10 @@ class KuwoPlugin(Star):
         self.timeout = self.config.get('timeout', 300)
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
-        self.quota_id = self.config.get('quota_id', "60004")
+        self.quota_id = self.config.get('quota_id', "30002")
+        # 发码档位必须与提现档位(kwtxid=30002)一致，60004是盲盒档，码与档位不匹配会被服务器判为"验证码已过期"
+        if self.quota_id == "60004":
+            self.quota_id = "30002"
         self.admin_qq = self.config.get('admin_qq', [])
         # 触发→真正发出提现请求的实测开销（秒）：每场独立实测，不和上一场混合
         self._send_overhead = 0.0
@@ -393,6 +396,19 @@ class KuwoPlugin(Star):
             if user_id not in all_data:
                 all_data[user_id] = self._get_default_user_data()
                 await self._save_all_data_unlocked(all_data)
+            else:
+                # 迁移旧验证码 cron：场前5分钟(55) → 场前3分钟(57)，避免提现时验证码刚好过期
+                ud = all_data[user_id]
+                changed = False
+                job = ud.get('scheduled_job')
+                if job and job.get('cron') == "15 55 8,12,16,19 * * *":
+                    job['cron'] = "15 57 8,12,16,19 * * *"
+                    changed = True
+                if ud.get('cron') == "15 55 8,12,16,19 * * *":
+                    ud['cron'] = "15 57 8,12,16,19 * * *"
+                    changed = True
+                if changed:
+                    await self._save_all_data_unlocked(all_data)
             return all_data[user_id]
 
     async def _save_data(self, user_id: str, user_data: dict):
@@ -1468,7 +1484,8 @@ class KuwoPlugin(Star):
                 for user_id, user_data in all_data.items():
                     job = user_data.get('scheduled_job', {})
                     if job.get('cron') and job.get('enabled'):
-                        nt = self._get_next_match_time(job['cron'], now)
+                        # 验证码同样按服务器时间调度：下发→提现的间隔才精确，不会被本地钟差吃掉
+                        nt = self._get_next_match_time(job['cron'], now_srv)
                         if nt:
                             events.append((nt, user_id, 'code', user_data))
                     wjob = user_data.get('withdraw_scheduled_job', {})
@@ -1493,7 +1510,7 @@ class KuwoPlugin(Star):
 
                 expired = []
                 for e in events:
-                    _ref_due = now_srv if e[2] == 'withdraw' else now
+                    _ref_due = now_srv
                     if e[0] <= _ref_due and (_ref_due - e[0]).total_seconds() <= 30:
                         expired.append(e)
                 if expired:
@@ -1510,7 +1527,7 @@ class KuwoPlugin(Star):
                     continue
 
                 next_time, next_uid, next_typ, next_udata = events[0]
-                _now_for_next = now_srv if next_typ == 'withdraw' else now
+                _now_for_next = now_srv
                 delay = (next_time - _now_for_next).total_seconds()
                 if delay > 30:
                     await asyncio.sleep(30)
