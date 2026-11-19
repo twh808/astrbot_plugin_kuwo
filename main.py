@@ -264,7 +264,7 @@ def withdraw_confirm_once(session, phone, loginUid, loginSid, appUid, encrypted_
             combined = f"{result.get('msg', '')}|{data.get('text', '')}|{data.get('description', '')}"
             last_combined = combined
             tag = "(第1次请求)" if attempt == 1 else f"(重试第{attempt-1}次)"
-            log_lines.append(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 📱{phone} #{seq} {tag} | {resp.status_code} | {elapsed_ms:.1f}ms | {combined[:200]}")
+            log_lines.append(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 📱{phone} #{seq} {tag} | 发出 {time.strftime('%H:%M:%S.%f', time.localtime(start))[:-3]} | {resp.status_code} | {elapsed_ms:.1f}ms | {combined[:200]}")
             if FREQUENT_ERROR_KEYWORD in combined and attempt <= max_extra_retries:
                 log_lines.append(f"⚠️ {phone} 遭遇频繁错误，{retry_delay_ms}ms 后重试...")
                 time.sleep(retry_delay_ms / 1000.0)
@@ -322,6 +322,9 @@ class KuwoPlugin(Star):
         self._time_offset = 0.0
         self._time_offset_updated_at = 0.0
         self._rtt = 0.0
+        # 提现接口路径的本场实测往返（触发前探测，每场重置，不跨场）
+        self._withdraw_path_rtt = 0.0
+        self._withdraw_path_probed_key = None
         self._fired_marks = set()
         self._all_data_cache = None
         self._cron_cache = {}
@@ -1200,12 +1203,16 @@ class KuwoPlugin(Star):
                 # 记录"触发→此刻真正要发请求"的耗时，供下一场自动提前
                 _send_samples.append(time.time() - trigger_ts)
             if dry_run:
-                # 每场触发前的空跑：只测预处理耗时，不发提现请求
+                # 覆盖 to_thread 调度耗时：真实路径在发出前还要提交一次线程池
+                self._get_thread_session()
+                await asyncio.to_thread(time.time)
                 return (phone, None, "dry-run", False)
             session = self._get_thread_session()
-            _, final_msg, is_success = await asyncio.to_thread(
+            log_lines, final_msg, is_success = await asyncio.to_thread(
                 withdraw_confirm_once, session, phone, uid, sid, appuid, encrypt_phone(phone), code_info["code"],
                 self.kwtxid, self.verification_id, self.q36, 1, self.max_retries, self.retry_delay_ms)
+            for _l in log_lines:
+                logger.info(_l)
             return (phone, final_msg, final_msg, is_success)
 
         results = await asyncio.gather(*[withdraw_single(acc) for acc in valid_accounts])
@@ -1377,6 +1384,33 @@ class KuwoPlugin(Star):
         rtts = [f"{r*1000:.0f}ms" for r, _ in samples_list]
         logger.info(f"⏱️ 酷我时间校准完成：偏移 {best_offset*1000:+.0f}ms (最优RTT {best_rtt*1000:.0f}ms/{len(samples_list)}样本, 所有RTT [{', '.join(rtts)}])")
         return best_offset, best_rtt
+
+    async def _probe_withdraw_path_rtt(self):
+        """本场触发前实测提现接口路径的真实往返：空参数请求，服务器秒回参数错误，
+        不消耗验证码/额度/授权次数。每场独立实测，网络波动不跨场。"""
+        self._withdraw_path_rtt = 0.0  # 每场重置
+        try:
+            def _one():
+                t0 = time.time()
+                try:
+                    resp = requests.get(
+                        'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw',
+                        params={'apiv': '9'}, timeout=3, verify=False)
+                    resp.close()
+                except Exception:
+                    return None
+                return (time.time() - t0) * 1000.0
+
+            samples = []
+            for _ in range(3):
+                r = await asyncio.to_thread(_one)
+                if r:
+                    samples.append(r)
+            if samples:
+                self._withdraw_path_rtt = min(samples) / 1000.0
+                logger.info(f"📡 提现接口路径本场实测往返 {min(samples):.1f}ms（每场独立，不跨场）")
+        except Exception as e:
+            logger.debug(f"提现路径探测失败: {e}")
 
     def _get_calibrated_now_ts(self) -> float:
         return time.time() + self._time_offset
@@ -1551,6 +1585,13 @@ class KuwoPlugin(Star):
                         logger.info(f"🔐 触发提现预登录: 用户 {next_uid}, 距整点 {delay:.1f}s")
                         asyncio.create_task(self._pre_login_for_withdraw(next_uid, next_udata))
 
+                # 每场触发前实测提现接口路径往返（与预登录同窗口，每场一次，本场网络，不跨场）
+                if next_typ == 'withdraw' and 5 <= delay <= 30:
+                    _wprobe_key = next_time.strftime('%Y%m%d%H%M')
+                    if self._withdraw_path_probed_key != _wprobe_key:
+                        self._withdraw_path_probed_key = _wprobe_key
+                        asyncio.create_task(self._probe_withdraw_path_rtt())
+
                 # 每场触发前空跑一次，测本场发送开销（不和上一场混）
                 if next_typ == 'withdraw' and 5 <= delay <= 20:
                     _probe_key = next_time.strftime('%Y%m%d%H%M')
@@ -1566,7 +1607,8 @@ class KuwoPlugin(Star):
                 _arrive_next = ARRIVE_AFTER if next_typ == 'withdraw' else 0.0
                 # 发令时刻提前 RTT/2，再减去"触发→真正发出请求"的实测开销，让请求到达服务器时正好整点
                 _overhead = self._send_overhead if next_typ == 'withdraw' else 0.0
-                fire_target = next_ts + _arrive_next - (self._rtt / 2 if next_typ == 'withdraw' else 0.0) - _overhead
+                _wrtt_cur = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) if next_typ == 'withdraw' else 0.0
+                fire_target = next_ts + _arrive_next - (_wrtt_cur / 2) - _overhead
                 while self.scheduler_running:
                     now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
                     r = fire_target - now_ref
@@ -1582,7 +1624,9 @@ class KuwoPlugin(Star):
                 for nt, uid, typ, udata in events:
                     now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
                     _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
-                    _rr = (self._rtt / 2) if typ == 'withdraw' else 0.0
+                    _rr = 0.0
+                    if typ == 'withdraw':
+                        _rr = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) / 2
                     ident = (uid, typ, int(nt.timestamp()))
                     if now_ref >= nt.timestamp() + _arrive - _rr - _overhead - 0.005:
                         if ident in self._fired_marks:
@@ -1602,10 +1646,15 @@ class KuwoPlugin(Star):
                     continue
 
                 for nt, uid, typ, udata in fired:
+                    _eta = None
+                    if typ == 'withdraw':
+                        _wrtt_eta = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) / 2
+                        _eta = time.time() + self._time_offset + _wrtt_eta + _overhead
                     logger.info(
                         f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 目标 {nt.strftime('%H:%M:%S')}, "
                         f"本地实际 {datetime.now().strftime('%H:%M:%S.%f')[:-3]}, "
                         f"时钟偏移 {self._time_offset*1000:+.0f}ms"
+                        + (f", 预计到达 {time.strftime('%H:%M:%S.%f', time.localtime(_eta))[:-3]}(服务器)" if _eta is not None else "")
                     )
                     if typ == 'code':
                         asyncio.create_task(self._execute_scheduled_job(uid, preloaded_data=udata))
