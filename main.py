@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os
 import asyncio
 import time
 import re
@@ -21,10 +20,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
-VERSION = "2.8.0"
-
-# 提现请求到达服务器 = 整点后多少秒；默认 0 = 整点立马发送，不等待
-ARRIVE_AFTER = float(os.getenv('ARRIVE_AFTER', '0'))
+VERSION = "2.7.0"
 
 # ======================================================================
 # 1. 加密常量
@@ -212,12 +208,12 @@ def check_withdraw_today(loginUid, loginSid, target_date_str=None):
     except Exception:
         return False
 
-def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002'):
+def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'):
     try:
         resp = requests.get(
             'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode',
             params={'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone, 'appuid': appUid,
-                    'apiv': '9', 'terminal': '1', 'quotaId': quota_id, 'type': 'highValue'},
+                    'apiv': '9', 'terminal': '1', 'quotaId': quota_id, 'type': 'blindBox'},
             headers={'Host': 'integralapi.kuwo.cn', 'Connection': 'keep-alive',
                      'Accept': 'application/json, text/plain, */*',
                      'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro; wv) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Mobile Safari/537.36 kuwopage',
@@ -264,7 +260,7 @@ def withdraw_confirm_once(session, phone, loginUid, loginSid, appUid, encrypted_
             combined = f"{result.get('msg', '')}|{data.get('text', '')}|{data.get('description', '')}"
             last_combined = combined
             tag = "(第1次请求)" if attempt == 1 else f"(重试第{attempt-1}次)"
-            log_lines.append(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 📱{phone} #{seq} {tag} | 发出 {time.strftime('%H:%M:%S.%f', time.localtime(start))[:-3]} | {resp.status_code} | {elapsed_ms:.1f}ms | {combined[:200]}")
+            log_lines.append(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 📱{phone} #{seq} {tag} | {resp.status_code} | {elapsed_ms:.1f}ms | {combined[:200]}")
             if FREQUENT_ERROR_KEYWORD in combined and attempt <= max_extra_retries:
                 log_lines.append(f"⚠️ {phone} 遭遇频繁错误，{retry_delay_ms}ms 后重试...")
                 time.sleep(retry_delay_ms / 1000.0)
@@ -290,8 +286,7 @@ class KuwoPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
-        # 默认验证码时间调整为 20 55 8,12,16,19 * * *
-        self.verification_cron = self.config.get('verification_cron', "20 55 8,12,16,19 * * *")
+        self.verification_cron = self.config.get('verification_cron', "15 55 8,12,16,19 * * *")
         self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 0,9,13,17,20 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
@@ -299,13 +294,8 @@ class KuwoPlugin(Star):
         self.timeout = self.config.get('timeout', 300)
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
-        self.quota_id = self.config.get('quota_id', "30002")
-        if self.quota_id == "60004":
-            self.quota_id = "30002"
+        self.quota_id = self.config.get('quota_id', "60004")
         self.admin_qq = self.config.get('admin_qq', [])
-        self._send_overhead = 0.0
-        self._overhead_probed_key = None
-        self._today_withdrawn = {}
 
         self.states = {}
         self.TIMEOUT = self.timeout
@@ -319,16 +309,13 @@ class KuwoPlugin(Star):
         self._login_cache_mem = {}
         self._time_offset = 0.0
         self._time_offset_updated_at = 0.0
-        self._rtt = 0.0
-        self._withdraw_path_rtt = 0.0
-        self._withdraw_path_probed_key = None
-        self._fired_marks = set()
         self._all_data_cache = None
         self._cron_cache = {}
         self._pre_login_tasks = {}
         self._session_local = threading.local()
         self._withdraw_warmed_at = 0.0
-        self._prelogin_task_key = None
+        self._prelogin_task_key = None   # 【新增】提现预登录任务标记，每个整点只登录一次
+        # 【新增】共享 session，配置大连接池供预热复用
         self._shared_session = requests.Session()
         _adapter = requests.adapters.HTTPAdapter(
             pool_connections=20,
@@ -339,6 +326,7 @@ class KuwoPlugin(Star):
         self._shared_session.mount('http://', _adapter)
 
     def _get_thread_session(self) -> requests.Session:
+        # 【改】返回共享 session，保证预热连接能被提现请求复用
         return self._shared_session
 
     # ---------- 数据持久化 ----------
@@ -394,20 +382,6 @@ class KuwoPlugin(Star):
             if user_id not in all_data:
                 all_data[user_id] = self._get_default_user_data()
                 await self._save_all_data_unlocked(all_data)
-            else:
-                ud = all_data[user_id]
-                changed = False
-                job = ud.get('scheduled_job')
-                # 自动迁移旧默认时间到新默认时间
-                old_crons = ["15 55 8,12,16,19 * * *", "15 57 8,12,16,19 * * *"]
-                if job and job.get('cron') in old_crons:
-                    job['cron'] = "20 55 8,12,16,19 * * *"
-                    changed = True
-                if ud.get('cron') in old_crons:
-                    ud['cron'] = "20 55 8,12,16,19 * * *"
-                    changed = True
-                if changed:
-                    await self._save_all_data_unlocked(all_data)
             return all_data[user_id]
 
     async def _save_data(self, user_id: str, user_data: dict):
@@ -742,7 +716,7 @@ class KuwoPlugin(Star):
             yield event.plain_result(
                 "📝 请输入cron表达式（格式：秒 分 时 日 月 周）\n"
                 "支持：*（任意）、数字、逗号分隔、范围(1-5)、步长(*/5)\n"
-                "例如：20 55 8,12,16,19 * * *\n输入 0 取消")
+                "例如：15 55 8,12,16,19 * * *\n输入 0 取消")
         elif has_rule and text == "2":
             setattr(event, '_timer_choice_processed', True)
             self._update_state(user_id, step='confirm_delete_timer')
@@ -1132,7 +1106,7 @@ class KuwoPlugin(Star):
         return "📨 请输入要发送验证码的账号序号（多个用逗号分隔），输入 all 发送全部，输入 0 返回：\n" + "\n".join(lines)
 
     # ---------- 核心提现 ----------
-    async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None, trigger_ts: float = None, dry_run: bool = False) -> str:
+    async def _process_withdraw(self, user_id: str, event: AstrMessageEvent = None) -> str:
         user_data = await self._load_data(user_id)
         if not user_data["accounts"]:
             return "❌ 请先绑定账号"
@@ -1146,30 +1120,23 @@ class KuwoPlugin(Star):
             return "❌ 没有可用的账号"
         codes = dict(user_data.get("verification_codes", {}))
         codes.update(self._code_cache_mem.get(user_id, {}))
-        
-        # 【修改】移除了本地时间有效性校验，只要存在验证码即视为有效（交由服务器判断）
         valid_accounts = []
         for acc in accounts:
             phone = acc["phone"]
             code_info = codes.get(phone)
-            if code_info:
+            if code_info and time.time() <= code_info.get("expire", 0):
                 valid_accounts.append(acc)
         if not valid_accounts:
-            return "❌ 所有账号均未配置验证码，请先获取验证码"
-
-        _send_samples = []
+            return "❌ 所有账号均未配置有效验证码，请先获取验证码"
 
         async def withdraw_single(acc):
             phone = acc["phone"]
-            # 服务器当天记录已提：整点不再请求，避免"请求过于频繁"
-            if phone in self._today_withdrawn.get(user_id, set()):
-                return (phone, "今日已提现（服务器），跳过", "今日已提现（服务器），跳过", False)
             code_info = codes.get(phone)
             if not code_info:
                 return (phone, None, "跳过（无验证码）", False)
             task_key = (user_id, phone)
             pre_task = self._pre_login_tasks.get(task_key)
-            if (not dry_run) and pre_task is not None and not pre_task.done():
+            if pre_task is not None and not pre_task.done():
                 logger.info(f"⏳ {phone} 预登录任务未完成，等待最多 3 秒...")
                 try:
                     await asyncio.wait_for(asyncio.shield(pre_task), timeout=3.0)
@@ -1185,11 +1152,6 @@ class KuwoPlugin(Star):
             if cached and time.time() <= cached.get("expire", 0):
                 uid, sid, appuid = cached["uid"], cached["sid"], cached["appuid"]
                 logger.info(f"⚡ {phone} 命中预登录缓存，直接提现")
-            elif dry_run:
-                # dry-run 不真登录，只测到这一步的耗时
-                if trigger_ts:
-                    _send_samples.append(time.time() - trigger_ts)
-                return (phone, None, "dry-run", False)
             else:
                 logger.info(f"🔐 {phone} 缓存未命中，走实时登录...")
                 login_result = await asyncio.to_thread(login_kuwo, phone, acc["password"])
@@ -1197,24 +1159,13 @@ class KuwoPlugin(Star):
                     return (phone, None, "登录失败", False)
                 uid, sid, appuid, _ = login_result
 
-            if trigger_ts:
-                # 记录"触发→此刻真正要发请求"的耗时，供下一场自动提前
-                _send_samples.append(time.time() - trigger_ts)
-            if dry_run:
-                self._get_thread_session()
-                await asyncio.to_thread(time.time)
-                return (phone, None, "dry-run", False)
             session = self._get_thread_session()
-            log_lines, final_msg, is_success = await asyncio.to_thread(
+            _, final_msg, is_success = await asyncio.to_thread(
                 withdraw_confirm_once, session, phone, uid, sid, appuid, encrypt_phone(phone), code_info["code"],
                 self.kwtxid, self.verification_id, self.q36, 1, self.max_retries, self.retry_delay_ms)
-            for _l in log_lines:
-                logger.info(_l)
             return (phone, final_msg, final_msg, is_success)
 
         results = await asyncio.gather(*[withdraw_single(acc) for acc in valid_accounts])
-        if _send_samples:
-            self._note_send_overhead(sum(_send_samples) / len(_send_samples))
         success_count = sum(1 for r in results if r[3])
         result_lines = [f"{'✅ 提现成功' if r[3] else '❌ 提现失败'} {r[0]}: {r[2]}" for r in results]
         skipped_phones = [acc["phone"] for acc in accounts if acc["phone"] not in [r[0] for r in results]]
@@ -1240,25 +1191,8 @@ class KuwoPlugin(Star):
                    f"━━━━━━━━━━━━\n")
         full_result = summary + "\n".join(result_lines)
         user_data["last_withdraw_log"] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "result": full_result}
-        if not dry_run:
-            await self._save_data(user_id, user_data)
+        await self._save_data(user_id, user_data)
         return full_result
-
-    def _note_send_overhead(self, overhead: float):
-        """每场独立实测发送开销，直接覆盖旧值，不和上一场混合。"""
-        if overhead <= 0 or overhead > 0.2:
-            return
-        self._send_overhead = min(max(overhead, 0.0), 0.08)
-
-    async def _probe_send_overhead(self, user_id: str):
-        """每场触发前空跑一遍提现预处理路径（不发 HTTP），测本场"任务开始→发请求"的本地开销。"""
-        self._send_overhead = 0.0  # 每场重置，不和上一场混合
-        try:
-            _t0 = time.time()
-            await self._process_withdraw(user_id, None, trigger_ts=_t0, dry_run=True)
-            logger.info(f"⏱️ 本场发送开销实测: {self._send_overhead*1000:.1f}ms")
-        except Exception as e:
-            logger.debug(f"发送开销探测失败: {e}")
 
     async def _do_withdraw(self, user_id: str, event: AstrMessageEvent) -> str:
         result = await self._process_withdraw(user_id, event)
@@ -1266,7 +1200,6 @@ class KuwoPlugin(Star):
 
     # ---------- 定时任务执行 ----------
     async def _execute_withdraw_scheduled_job(self, user_id: str, preloaded_data: dict = None):
-        _job_start = time.time()
         lock_key = f"{user_id}_withdraw"
         now = datetime.now()
         last = self._last_trigger_time.get(lock_key)
@@ -1282,9 +1215,8 @@ class KuwoPlugin(Star):
                 logger.info(f"用户 {user_id} 提现定时任务未启用或无规则")
                 return
             user_data['withdraw_scheduled_job']['last_executed'] = now.strftime('%Y-%m-%d %H:%M:%S')
-            # 提现请求优先打出去：写库挪到提现完成后再做，避免占用整点前关键的那几十毫秒
-            result = await self._process_withdraw(user_id, None, trigger_ts=_job_start)
             await self._save_data(user_id, user_data)
+            result = await self._process_withdraw(user_id, None)
             state = self._get_state(user_id)
             umo = state.get('umo')
             if umo:
@@ -1348,66 +1280,37 @@ class KuwoPlugin(Star):
         else:
             logger.info(f"用户 {user_id} 无会话，消息未发送: {message}")
 
-    # ---------- 时间校准（酷我服务器时间） ----------
-    async def _calibrate_time(self, samples=10):
-        """用酷我 newUserSignList 返回的 curTime 校准本机时间，返回 (offset, rtt)（本机时间 + offset = 服务器时间）。
-        取 RTT 最小的样本；样本数越大越稳。"""
-        time_probe_url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newUserSignList'
+    # ---------- 时间校准 ----------
+    async def _calibrate_time(self, samples=2):
+        sources = ["https://www.baidu.com", "https://www.qq.com", "https://www.taobao.com", "https://www.jd.com"][:samples]
         samples_list = []
-        for _ in range(samples):
+        for url in sources:
             try:
                 t0 = time.time()
-                resp = await asyncio.to_thread(requests.get, time_probe_url, timeout=5, verify=False)
+                resp = await asyncio.to_thread(requests.head, url, timeout=3, allow_redirects=False)
                 t1 = time.time()
-                if resp.status_code != 200:
+                date_header = resp.headers.get('Date')
+                if not date_header:
                     continue
-                data = resp.json()
-                ct = data.get('curTime')
-                if ct is None:
+                server_dt = email.utils.parsedate_to_datetime(date_header)
+                if server_dt is None:
                     continue
-                server_sec = float(ct)
-                if server_sec > 1e12:          # 毫秒时间戳
-                    server_sec /= 1000.0
                 rtt = t1 - t0
-                offset = server_sec - (t1 - rtt / 2)
+                offset = (server_dt.timestamp() + rtt / 2) - t1
                 samples_list.append((rtt, offset))
             except Exception as e:
-                logger.debug(f"酷我时间校准失败: {e}")
+                logger.debug(f"时间源 {url} 校准失败: {e}")
         if not samples_list:
-            logger.warning("⚠️ 酷我时间校准失败：无法获取服务器时间，使用本地时间")
-            return 0.0, 0.0
+            logger.warning("⚠️ 时间校准失败：所有时间源均不可用，使用本地时间")
+            return 0.0
         samples_list.sort(key=lambda x: x[0])
         best_rtt, best_offset = samples_list[0]
+        if abs(best_offset) > 5.0:
+            logger.warning(f"⚠️ 时间校准结果异常（偏移 {best_offset*1000:+.0f}ms > 5s），改用本地时间")
+            return 0.0
         rtts = [f"{r*1000:.0f}ms" for r, _ in samples_list]
-        logger.info(f"⏱️ 酷我时间校准完成：偏移 {best_offset*1000:+.0f}ms (最优RTT {best_rtt*1000:.0f}ms/{len(samples_list)}样本, 所有RTT [{', '.join(rtts)}])")
-        return best_offset, best_rtt
-
-    async def _probe_withdraw_path_rtt(self):
-        """本场触发前实测提现接口路径的真实往返：空参数请求，服务器秒回参数错误，
-        不消耗验证码/额度/授权次数。每场独立实测，网络波动不跨场。"""
-        self._withdraw_path_rtt = 0.0  # 每场重置
-        try:
-            def _one():
-                t0 = time.time()
-                try:
-                    resp = requests.get(
-                        'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw',
-                        params={'apiv': '9'}, timeout=3, verify=False)
-                    resp.close()
-                except Exception:
-                    return None
-                return (time.time() - t0) * 1000.0
-
-            samples = []
-            for _ in range(3):
-                r = await asyncio.to_thread(_one)
-                if r:
-                    samples.append(r)
-            if samples:
-                self._withdraw_path_rtt = min(samples) / 1000.0
-                logger.info(f"📡 提现接口路径本场实测往返 {min(samples):.1f}ms（每场独立，不跨场）")
-        except Exception as e:
-            logger.debug(f"提现路径探测失败: {e}")
+        logger.info(f"⏱️ 时间校准完成：偏移 {best_offset*1000:+.0f}ms (最优RTT {best_rtt*1000:.0f}ms, 所有RTT [{', '.join(rtts)}])")
+        return best_offset
 
     def _get_calibrated_now_ts(self) -> float:
         return time.time() + self._time_offset
@@ -1433,7 +1336,7 @@ class KuwoPlugin(Star):
         except Exception as e:
             logger.debug(f"提现连接预热失败: {e}")
 
-    # ---------- 提现预登录 ----------
+    # ---------- 【新增】提现预登录 ----------
     async def _pre_login_for_withdraw(self, user_id: str, user_data: dict):
         """整点前提现预登录：并发登录所有目标账号，缓存凭证。
         不依赖验证码——验证码只是提现参数，59:58 提交也能用。
@@ -1447,9 +1350,6 @@ class KuwoPlugin(Star):
             return
         target_accounts = accounts[:auth_limit] if auth_limit != -1 else accounts
 
-        # 每场重置"服务器已提"标记，不和上一场混
-        self._today_withdrawn.pop(user_id, None)
-
         async def _login_one(acc):
             phone = acc["phone"]
             try:
@@ -1459,11 +1359,6 @@ class KuwoPlugin(Star):
                     self._login_cache_mem.setdefault(user_id, {})[phone] = {
                         "uid": uid, "sid": sid, "appuid": appuid, "expire": time.time() + 600}
                     logger.info(f"⚡ 提现预登录成功: {phone}")
-                    # 顺手查服务器当天记录：今天已提就标记，整点不再白打 4 次
-                    today = self._get_effective_today_str()
-                    if await asyncio.to_thread(check_withdraw_today, uid, sid, today):
-                        self._today_withdrawn.setdefault(user_id, set()).add(phone)
-                        logger.info(f"⏭️ {phone} 服务器记录显示今日已提，本场跳过")
                 else:
                     logger.warning(f"⚠️ 提现预登录失败: {phone}")
             except Exception as e:
@@ -1509,20 +1404,17 @@ class KuwoPlugin(Star):
         while self.scheduler_running:
             try:
                 now = datetime.now()
-                now_srv = datetime.fromtimestamp(time.time() + self._time_offset)
                 all_data = await self._load_all_data()
                 events = []
                 for user_id, user_data in all_data.items():
                     job = user_data.get('scheduled_job', {})
                     if job.get('cron') and job.get('enabled'):
-                        # 验证码同样按服务器时间调度：下发→提现的间隔才精确，不会被本地钟差吃掉
-                        nt = self._get_next_match_time(job['cron'], now_srv)
+                        nt = self._get_next_match_time(job['cron'], now)
                         if nt:
                             events.append((nt, user_id, 'code', user_data))
                     wjob = user_data.get('withdraw_scheduled_job', {})
                     if wjob.get('cron') and wjob.get('enabled'):
-                        # withdraw 用服务器时间算下一场，避免本地/服务器时间差导致过点后重复触发
-                        nt = self._get_next_match_time(wjob['cron'], now_srv)
+                        nt = self._get_next_match_time(wjob['cron'], now)
                         if nt:
                             events.append((nt, user_id, 'withdraw', user_data))
                 if not events:
@@ -1535,21 +1427,9 @@ class KuwoPlugin(Star):
                         unique[key] = (nt, uid, typ, udata)
                 events = sorted(unique.values(), key=lambda x: x[0])
 
-                # 清理 1 小时前的触发标记，避免集合无限增长
-                _now_epoch = time.time()
-                self._fired_marks = {m for m in self._fired_marks if _now_epoch - m[2] < 3600}
-
-                expired = []
-                for e in events:
-                    _ref_due = now_srv
-                    if e[0] <= _ref_due and (_ref_due - e[0]).total_seconds() <= 30:
-                        expired.append(e)
+                expired = [e for e in events if e[0] <= now and (now - e[0]).total_seconds() <= 30]
                 if expired:
                     for nt, uid, typ, udata in expired:
-                        ident = (uid, typ, int(nt.timestamp()))
-                        if ident in self._fired_marks:
-                            continue
-                        self._fired_marks.add(ident)
                         logger.info(f"⏰ 触发已到期任务: 用户 {uid}, 类型 {typ}, 原定 {nt.strftime('%H:%M:%S.%f')}")
                         if typ == 'code':
                             asyncio.create_task(self._execute_scheduled_job(uid, preloaded_data=udata))
@@ -1558,15 +1438,14 @@ class KuwoPlugin(Star):
                     continue
 
                 next_time, next_uid, next_typ, next_udata = events[0]
-                _now_for_next = now_srv
-                delay = (next_time - _now_for_next).total_seconds()
+                delay = (next_time - now).total_seconds()
                 if delay > 30:
                     await asyncio.sleep(30)
                     continue
 
                 now_ts = time.time()
-                if next_typ == 'withdraw' and 1 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 120:
-                    self._time_offset, self._rtt = await self._calibrate_time()
+                if next_typ == 'withdraw' and 3 <= delay <= 30 and (now_ts - self._time_offset_updated_at) > 300:
+                    self._time_offset = await self._calibrate_time()
                     self._time_offset_updated_at = time.time()
 
                 # 预热窗口放宽到 1~20 秒，每 3 秒一次
@@ -1574,7 +1453,7 @@ class KuwoPlugin(Star):
                     asyncio.create_task(self._warm_up_withdraw())
                     self._withdraw_warmed_at = time.time()
 
-                # 整点前 5~30 秒：预登录所有目标账号（每个提现任务只做一次）
+                # 【新增】整点前 5~30 秒：预登录所有目标账号（每个提现任务只做一次）
                 if next_typ == 'withdraw' and 5 <= delay <= 30:
                     task_key = f"{next_uid}_{next_time.strftime('%Y%m%d%H%M')}"
                     if self._prelogin_task_key != task_key:
@@ -1582,91 +1461,32 @@ class KuwoPlugin(Star):
                         logger.info(f"🔐 触发提现预登录: 用户 {next_uid}, 距整点 {delay:.1f}s")
                         asyncio.create_task(self._pre_login_for_withdraw(next_uid, next_udata))
 
-                # 每场触发前实测提现接口路径往返（与预登录同窗口，每场一次，本场网络，不跨场）
-                if next_typ == 'withdraw' and 5 <= delay <= 30:
-                    _wprobe_key = next_time.strftime('%Y%m%d%H%M')
-                    if self._withdraw_path_probed_key != _wprobe_key:
-                        self._withdraw_path_probed_key = _wprobe_key
-                        asyncio.create_task(self._probe_withdraw_path_rtt())
-
-                # 每场触发前空跑一次，测本场发送开销（不和上一场混）
-                if next_typ == 'withdraw' and 5 <= delay <= 20:
-                    _probe_key = next_time.strftime('%Y%m%d%H%M')
-                    if self._overhead_probed_key != _probe_key:
-                        self._overhead_probed_key = _probe_key
-                        for _nt2, _uid2, _typ2, _udata2 in events:
-                            if _typ2 == 'withdraw' and (_udata2.get('accounts') or []):
-                                await self._probe_send_overhead(_uid2)
-                                if self._send_overhead > 0:
-                                    break
-
                 next_ts = next_time.timestamp()
-                _arrive_next = ARRIVE_AFTER if next_typ == 'withdraw' else 0.0
-                # 发令时刻提前 RTT/2，再减去"触发→真正发出请求"的实测开销，让请求到达服务器时正好整点
-                _overhead = self._send_overhead if next_typ == 'withdraw' else 0.0
-                _wrtt_cur = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) if next_typ == 'withdraw' else 0.0
-                fire_target = next_ts + _arrive_next - (_wrtt_cur / 2) - _overhead
                 while self.scheduler_running:
                     now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
-                    r = fire_target - now_ref
-                    if r <= 0.0005:
+                    r = next_ts - now_ref
+                    if r <= 0.005:
                         break
-                    if r > 0.05:
-                        await asyncio.sleep(min(r - 0.03, 0.5))
-                    else:
-                        # 最后 50ms 用 sleep(0) 高频重试，避免 Windows asyncio.sleep 精度差导致晚 15~80ms
-                        await asyncio.sleep(0)
+                    await asyncio.sleep(min(r, 0.5))
 
                 fired = []
                 for nt, uid, typ, udata in events:
                     now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
-                    _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
-                    _rr = 0.0
-                    if typ == 'withdraw':
-                        _rr = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) / 2
-                    ident = (uid, typ, int(nt.timestamp()))
-                    if now_ref >= nt.timestamp() + _arrive - _rr - _overhead - 0.005:
-                        if ident in self._fired_marks:
-                            continue
-                        self._fired_marks.add(ident)
+                    if now_ref >= nt.timestamp() - 0.005:
                         fired.append((nt, uid, typ, udata))
 
                 if not fired:
-                    # 本场已提前 RTT/2 触发过（fired_marks 命中），但服务器时间还没到整点
-                    _wait_left = next_ts - (time.time() + self._time_offset)
-                    if _wait_left > 0:
-                        await asyncio.sleep(min(_wait_left + 0.002, 0.5))
-                    else:
-                        await asyncio.sleep(0.05)
-                    
-                    # 醒来后重新检查 fired，防止因毫秒级误差导致 continue 后任务被跳过
-                    for nt, uid, typ, udata in events:
-                        now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
-                        _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
-                        _rr = 0.0
-                        if typ == 'withdraw':
-                            _rr = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) / 2
-                        _cur_overhead = self._send_overhead if typ == 'withdraw' else 0.0
-                        ident = (uid, typ, int(nt.timestamp()))
-                        if now_ref >= nt.timestamp() + _arrive - _rr - _cur_overhead - 0.005:
-                            if ident in self._fired_marks:
-                                continue
-                            self._fired_marks.add(ident)
-                            fired.append((nt, uid, typ, udata))
-                    
-                    if not fired:
-                        continue
+                    logger.warning(
+                        f"⚠️ 等待结束但无任务触发：next={next_time.strftime('%H:%M:%S.%f')}, "
+                        f"now={datetime.now().strftime('%H:%M:%S.%f')}, "
+                        f"typ={next_typ}, offset={self._time_offset*1000:+.0f}ms"
+                    )
 
                 for nt, uid, typ, udata in fired:
-                    _eta = None
-                    if typ == 'withdraw':
-                        _wrtt_eta = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) / 2
-                        _eta = time.time() + self._time_offset + _wrtt_eta + _overhead
                     logger.info(
                         f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 目标 {nt.strftime('%H:%M:%S')}, "
                         f"本地实际 {datetime.now().strftime('%H:%M:%S.%f')[:-3]}, "
                         f"时钟偏移 {self._time_offset*1000:+.0f}ms"
-                        + (f", 预计到达 {time.strftime('%H:%M:%S.%f', time.localtime(_eta))[:-3]}(服务器)" if _eta is not None else "")
                     )
                     if typ == 'code':
                         asyncio.create_task(self._execute_scheduled_job(uid, preloaded_data=udata))
@@ -2193,8 +2013,8 @@ class KuwoPlugin(Star):
         logger.info("🚀 酷我插件正在初始化...")
         all_data = await self._load_all_data()
         updated = False
-        old_withdraw_cron = "0 0 9,13,17,20 * * *"
-        new_withdraw_cron = "0 0 0,9,13,17,20 * * *"
+        old_cron = "0 0 9,13,17,20 * * *"
+        new_cron = "0 0 0,9,13,17,20 * * *"
         for user_id, user_data in all_data.items():
             if "accounts" in user_data and len(user_data["accounts"]) > 1:
                 unique_dict = {a["phone"]: a for a in user_data["accounts"] if a.get("phone")}
@@ -2208,10 +2028,10 @@ class KuwoPlugin(Star):
                 user_data["withdraw_scheduled_job"] = {"cron": self.default_withdraw_cron, "enabled": True, "last_executed": None}
                 updated = True
             wjob = user_data.get("withdraw_scheduled_job", {})
-            if wjob.get("cron") == old_withdraw_cron:
-                wjob["cron"] = new_withdraw_cron
+            if wjob.get("cron") == old_cron:
+                wjob["cron"] = new_cron
                 updated = True
-                logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_withdraw_cron}")
+                logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_cron}")
             if "last_withdraw_log" not in user_data:
                 user_data["last_withdraw_log"] = None
                 updated = True
