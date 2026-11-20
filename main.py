@@ -1635,15 +1635,30 @@ class KuwoPlugin(Star):
                         fired.append((nt, uid, typ, udata))
 
                 if not fired:
-                    # 本场已提前 RTT/2 触发过（fired_marks 命中），但服务器时间还没到整点，
-                    # 下一轮 _get_next_match_time 仍会返回同一整点。这里睡到整点过去再继续：
-                    # 既不空转刷屏，也把事件循环让给刚创建的提现任务，避免请求被推迟发出。
+                    # 本场已提前 RTT/2 触发过（fired_marks 命中），但服务器时间还没到整点
                     _wait_left = next_ts - (time.time() + self._time_offset)
                     if _wait_left > 0:
                         await asyncio.sleep(min(_wait_left + 0.002, 0.5))
                     else:
                         await asyncio.sleep(0.05)
-                    continue
+                    
+                    # 🌟 修复：醒来后重新检查 fired，防止因毫秒级误差导致 continue 后任务被跳过
+                    for nt, uid, typ, udata in events:
+                        now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
+                        _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
+                        _rr = 0.0
+                        if typ == 'withdraw':
+                            _rr = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) / 2
+                        _cur_overhead = self._send_overhead if typ == 'withdraw' else 0.0
+                        ident = (uid, typ, int(nt.timestamp()))
+                        if now_ref >= nt.timestamp() + _arrive - _rr - _cur_overhead - 0.005:
+                            if ident in self._fired_marks:
+                                continue
+                            self._fired_marks.add(ident)
+                            fired.append((nt, uid, typ, udata))
+                    
+                    if not fired:
+                        continue
 
                 for nt, uid, typ, udata in fired:
                     _eta = None
