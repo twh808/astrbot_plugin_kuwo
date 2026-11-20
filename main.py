@@ -21,7 +21,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 
 # 提现请求到达服务器 = 整点后多少秒；默认 0 = 整点立马发送，不等待
 ARRIVE_AFTER = float(os.getenv('ARRIVE_AFTER', '0'))
@@ -290,7 +290,8 @@ class KuwoPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self.default_auth_limit = self.config.get('default_auth_limit', 3)
-        self.verification_cron = self.config.get('verification_cron', "15 57 8,12,16,19 * * *")
+        # 默认验证码时间调整为 20 55 8,12,16,19 * * *
+        self.verification_cron = self.config.get('verification_cron', "20 55 8,12,16,19 * * *")
         self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 0,9,13,17,20 * * *")
         self.verification_id = self.config.get('verification_id', "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
         self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
@@ -299,14 +300,11 @@ class KuwoPlugin(Star):
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
         self.quota_id = self.config.get('quota_id', "30002")
-        # 发码档位必须与提现档位(kwtxid=30002)一致，60004是盲盒档，码与档位不匹配会被服务器判为"验证码已过期"
         if self.quota_id == "60004":
             self.quota_id = "30002"
         self.admin_qq = self.config.get('admin_qq', [])
-        # 触发→真正发出提现请求的实测开销（秒）：每场独立实测，不和上一场混合
         self._send_overhead = 0.0
         self._overhead_probed_key = None
-        # 服务器当天已提标记（预登录时查 withdrawDetails，提现时跳过，避免"请求过于频繁"）
         self._today_withdrawn = {}
 
         self.states = {}
@@ -322,7 +320,6 @@ class KuwoPlugin(Star):
         self._time_offset = 0.0
         self._time_offset_updated_at = 0.0
         self._rtt = 0.0
-        # 提现接口路径的本场实测往返（触发前探测，每场重置，不跨场）
         self._withdraw_path_rtt = 0.0
         self._withdraw_path_probed_key = None
         self._fired_marks = set()
@@ -331,8 +328,7 @@ class KuwoPlugin(Star):
         self._pre_login_tasks = {}
         self._session_local = threading.local()
         self._withdraw_warmed_at = 0.0
-        self._prelogin_task_key = None   # 【新增】提现预登录任务标记，每个整点只登录一次
-        # 【新增】共享 session，配置大连接池供预热复用
+        self._prelogin_task_key = None
         self._shared_session = requests.Session()
         _adapter = requests.adapters.HTTPAdapter(
             pool_connections=20,
@@ -343,7 +339,6 @@ class KuwoPlugin(Star):
         self._shared_session.mount('http://', _adapter)
 
     def _get_thread_session(self) -> requests.Session:
-        # 【改】返回共享 session，保证预热连接能被提现请求复用
         return self._shared_session
 
     # ---------- 数据持久化 ----------
@@ -400,15 +395,16 @@ class KuwoPlugin(Star):
                 all_data[user_id] = self._get_default_user_data()
                 await self._save_all_data_unlocked(all_data)
             else:
-                # 迁移旧验证码 cron：场前5分钟(55) → 场前3分钟(57)，避免提现时验证码刚好过期
                 ud = all_data[user_id]
                 changed = False
                 job = ud.get('scheduled_job')
-                if job and job.get('cron') == "15 55 8,12,16,19 * * *":
-                    job['cron'] = "15 57 8,12,16,19 * * *"
+                # 自动迁移旧默认时间到新默认时间
+                old_crons = ["15 55 8,12,16,19 * * *", "15 57 8,12,16,19 * * *"]
+                if job and job.get('cron') in old_crons:
+                    job['cron'] = "20 55 8,12,16,19 * * *"
                     changed = True
-                if ud.get('cron') == "15 55 8,12,16,19 * * *":
-                    ud['cron'] = "15 57 8,12,16,19 * * *"
+                if ud.get('cron') in old_crons:
+                    ud['cron'] = "20 55 8,12,16,19 * * *"
                     changed = True
                 if changed:
                     await self._save_all_data_unlocked(all_data)
@@ -746,7 +742,7 @@ class KuwoPlugin(Star):
             yield event.plain_result(
                 "📝 请输入cron表达式（格式：秒 分 时 日 月 周）\n"
                 "支持：*（任意）、数字、逗号分隔、范围(1-5)、步长(*/5)\n"
-                "例如：15 55 8,12,16,19 * * *\n输入 0 取消")
+                "例如：20 55 8,12,16,19 * * *\n输入 0 取消")
         elif has_rule and text == "2":
             setattr(event, '_timer_choice_processed', True)
             self._update_state(user_id, step='confirm_delete_timer')
@@ -1150,14 +1146,16 @@ class KuwoPlugin(Star):
             return "❌ 没有可用的账号"
         codes = dict(user_data.get("verification_codes", {}))
         codes.update(self._code_cache_mem.get(user_id, {}))
+        
+        # 【修改】移除了本地时间有效性校验，只要存在验证码即视为有效（交由服务器判断）
         valid_accounts = []
         for acc in accounts:
             phone = acc["phone"]
             code_info = codes.get(phone)
-            if code_info and time.time() <= code_info.get("expire", 0):
+            if code_info:
                 valid_accounts.append(acc)
         if not valid_accounts:
-            return "❌ 所有账号均未配置有效验证码，请先获取验证码"
+            return "❌ 所有账号均未配置验证码，请先获取验证码"
 
         _send_samples = []
 
@@ -1203,7 +1201,6 @@ class KuwoPlugin(Star):
                 # 记录"触发→此刻真正要发请求"的耗时，供下一场自动提前
                 _send_samples.append(time.time() - trigger_ts)
             if dry_run:
-                # 覆盖 to_thread 调度耗时：真实路径在发出前还要提交一次线程池
                 self._get_thread_session()
                 await asyncio.to_thread(time.time)
                 return (phone, None, "dry-run", False)
@@ -1436,7 +1433,7 @@ class KuwoPlugin(Star):
         except Exception as e:
             logger.debug(f"提现连接预热失败: {e}")
 
-    # ---------- 【新增】提现预登录 ----------
+    # ---------- 提现预登录 ----------
     async def _pre_login_for_withdraw(self, user_id: str, user_data: dict):
         """整点前提现预登录：并发登录所有目标账号，缓存凭证。
         不依赖验证码——验证码只是提现参数，59:58 提交也能用。
@@ -1577,7 +1574,7 @@ class KuwoPlugin(Star):
                     asyncio.create_task(self._warm_up_withdraw())
                     self._withdraw_warmed_at = time.time()
 
-                # 【新增】整点前 5~30 秒：预登录所有目标账号（每个提现任务只做一次）
+                # 整点前 5~30 秒：预登录所有目标账号（每个提现任务只做一次）
                 if next_typ == 'withdraw' and 5 <= delay <= 30:
                     task_key = f"{next_uid}_{next_time.strftime('%Y%m%d%H%M')}"
                     if self._prelogin_task_key != task_key:
@@ -1642,7 +1639,7 @@ class KuwoPlugin(Star):
                     else:
                         await asyncio.sleep(0.05)
                     
-                    # 🌟 修复：醒来后重新检查 fired，防止因毫秒级误差导致 continue 后任务被跳过
+                    # 醒来后重新检查 fired，防止因毫秒级误差导致 continue 后任务被跳过
                     for nt, uid, typ, udata in events:
                         now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
                         _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
@@ -2196,8 +2193,8 @@ class KuwoPlugin(Star):
         logger.info("🚀 酷我插件正在初始化...")
         all_data = await self._load_all_data()
         updated = False
-        old_cron = "0 0 9,13,17,20 * * *"
-        new_cron = "0 0 0,9,13,17,20 * * *"
+        old_withdraw_cron = "0 0 9,13,17,20 * * *"
+        new_withdraw_cron = "0 0 0,9,13,17,20 * * *"
         for user_id, user_data in all_data.items():
             if "accounts" in user_data and len(user_data["accounts"]) > 1:
                 unique_dict = {a["phone"]: a for a in user_data["accounts"] if a.get("phone")}
@@ -2211,10 +2208,10 @@ class KuwoPlugin(Star):
                 user_data["withdraw_scheduled_job"] = {"cron": self.default_withdraw_cron, "enabled": True, "last_executed": None}
                 updated = True
             wjob = user_data.get("withdraw_scheduled_job", {})
-            if wjob.get("cron") == old_cron:
-                wjob["cron"] = new_cron
+            if wjob.get("cron") == old_withdraw_cron:
+                wjob["cron"] = new_withdraw_cron
                 updated = True
-                logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_cron}")
+                logger.info(f"🔄 已更新用户 {user_id} 的提现Cron为 {new_withdraw_cron}")
             if "last_withdraw_log" not in user_data:
                 user_data["last_withdraw_log"] = None
                 updated = True
