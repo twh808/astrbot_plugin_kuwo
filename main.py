@@ -1,70 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-astrbot_plugin_kuwo 提现模块 — 预连接整点发射最优方案
-版本: 2.7.0
-
-核心改动（相对 2.6.3）：
-1. 验证码提交只更新内存字典（零 IO），59:58 提交也能赶上整点。
-2. 登录 + TCP/TLS 预连接在后台提前完成，不依赖验证码。
-3. 每账号独立 requests.Session，每 Session 仅由一个线程使用。
-4. 整点前 30 秒保活一次，避免 keep-alive 被回收。
-5. 整点用 ThreadPoolExecutor 并发发射，复用已预热连接。
-6. 频繁重试规则保持：最多 3 次额外重试，间隔 4000ms。
-"""
-
-import os
-import sys
+import asyncio
 import time
+import re
 import base64
 import random
 import string
 import uuid
-import json
-import sqlite3
-import re
-import hashlib
+import email.utils
 import threading
-import asyncio
+import concurrent.futures
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, Dict, List, Tuple
-
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3 import PoolManager
-import urllib3
-
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
-
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from urllib.parse import quote
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-VERSION = "2.7.0"
-
-# ============================================================
-# 常量（与脚本保持一致）
-# ============================================================
-DB_PATH = os.getenv('DB_PATH', '/app/Dumb-Panel/daidai.db')
-ENV_NAME_KWTX = 'kwtx'
-DEFAULT_VERIFICATION_ID = (
-    'BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D'
-)
-DEFAULT_Q36 = 'a9441d902f38da7d2d25bf1f10001a319907'
-FREQUENT_ERROR_KEYWORD = "频繁"
-MAX_EXTRA_RETRIES = 3
-RETRY_DELAY_MS = 4000
-PREWARM_AHEAD_SECONDS = 180          # 整点前 3 分钟开始登录+预连接
-KEEPALIVE_AHEAD_SECONDS = 30        # 整点前 30 秒保活
-WITHDRAW_API_HOST = "integralapi.kuwo.cn"
-
-# ============================================================
-# 加密函数（来自你的脚本，完整保留）
-# ============================================================
+# ======================================================================
+# 1. 加密常量
+# ======================================================================
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
 static_e = [31, 0, 1, 2, 3, 4, -1, -1, 3, 4, 5, 6, 7, 8, -1, -1, 7, 8, 9, 10, 11, 12, -1, -1, 11, 12, 13, 14, 15, 16, -1, -1, 15, 16, 17, 18, 19, 20, -1, -1, 19, 20, 21, 22, 23, 24, -1, -1, 23, 24, 25, 26, 27, 28, -1, -1, 27, 28, 29, 30, 31, 30, -1, -1]
@@ -86,6 +43,7 @@ def func_a1(iArr, i2, j2):
                 j3 |= jArr[i3]
     return j3
 
+
 def func_a2(j2, jArr, i2):
     a2 = func_a1(static_i, 56, j2)
     for i3 in range(16):
@@ -99,6 +57,7 @@ def func_a2(j2, jArr, i2):
             i5 = 15 - i4
             jArr[i4] = jArr[i5]
             jArr[i5] = j3
+
 
 def func_a3(jArr, j2):
     p = [0] * 2
@@ -150,6 +109,7 @@ def func_a3(jArr, j2):
     m = func_a1(static_h, 64, m)
     return m
 
+
 def generate_q(bArr, bArr2):
     length = len(bArr)
     jArr = [0] * 16
@@ -186,201 +146,134 @@ def generate_q(bArr, bArr2):
         i13 = i14
     return base64.b64encode(bytearray(bArr3)).decode()
 
+
 def create_sx():
     timestamp = int(time.time() * 1000)
     combined_string = str(timestamp) + '12345678'
     return combined_string[:8]
 
+
 def encrypt_devid(dev_id):
     padded_id = dev_id.ljust(16, '0')[:16]
     return base64.b64encode(padded_id.encode()).decode()
 
+
 def get_q(username, password):
     dev_id = ''.join([random.choice(string.digits) for _ in range(10)])
-    dev_name = '安卓设备'
-    devType = 'arr'
-    data = (f"username={requests.utils.quote(username)}"
-            f"&password={requests.utils.quote(base64.b64encode(password.encode()).decode())}"
-            f"&dev_id={dev_id}&user={str(uuid.uuid4()).replace('-', '')}"
-            f"&dev_name={requests.utils.quote(dev_name)}&urlencode=0"
+    data = (f"username={quote(username)}"
+            f"&password={quote(base64.b64encode(password.encode()).decode())}"
+            f"&dev_id={dev_id}&user={uuid.uuid4().hex}"
+            f"&dev_name={quote('安卓设备')}&urlencode=0"
             f"&src=kwplayer_ar11.1.4.1_40.apk&devResolution=720*1080&&from=android"
-            f"&devType={devType}&sx={create_sx()}&version=11.1.4.1")
-    q_value = generate_q(data.encode('UTF-8'), 'kwks&@69'.encode('UTF-8'))
-    encrypted_dev_id = encrypt_devid(dev_id)
-    return q_value, encrypted_dev_id
+            f"&devType=arr&sx={create_sx()}&version=11.1.4.1")
+    return generate_q(data.encode('UTF-8'), 'kwks&@69'.encode('UTF-8')), encrypt_devid(dev_id)
+
 
 def encrypt_phone(phone):
-    key = b'ysiVkLJHHnvMWCHq'
-    iv = b'ichYooX+Mb1gRetP'
     if isinstance(phone, str):
         phone = phone.encode('utf-8')
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    padded_plaintext = pad(phone, AES.block_size)
-    ciphertext = cipher.encrypt(padded_plaintext)
-    return base64.b64encode(ciphertext).decode('utf-8')
-
-def decrypt_phone(encrypted_phone):
-    key = b'ysiVkLJHHnvMWCHq'
-    iv = b'ichYooX+Mb1gRetP'
-    aes = AES.new(key=key, mode=AES.MODE_CBC, iv=iv)
-    encrypted_data = base64.b64decode(encrypted_phone)
-    decrypted_data = unpad(aes.decrypt(encrypted_data), AES.block_size, style='pkcs7')
-    return decrypted_data.decode('UTF-8')
-
-# ============================================================
-# 账户解析（保留你脚本的逻辑）
-# ============================================================
-def parse_account_item(account_str: str) -> Optional[dict]:
-    parts = [x.strip() for x in account_str.split('#')]
-    if len(parts) < 2:
-        return None
-    limit = None
-    last = parts[-1]
-    if last.isdigit() and int(last) > 0:
-        limit = int(last)
-        parts = parts[:-1]
-    if len(parts) < 2:
-        return None
-    if len(parts) == 2:
-        phone, password = parts[0], parts[1]
-    else:
-        phone = parts[1]
-        password = '#'.join(parts[2:])
-    if not phone or not password:
-        return None
-    return {'phone': phone, 'password': password, 'limit': limit}
+    cipher = AES.new(b'ysiVkLJHHnvMWCHq', AES.MODE_CBC, b'ichYooX+Mb1gRetP')
+    return base64.b64encode(cipher.encrypt(pad(phone, AES.block_size))).decode('utf-8')
 
 
-def get_accounts_from_env() -> List[dict]:
-    env_value = os.getenv(ENV_NAME_KWTX, '').strip()
-    if not env_value:
-        return []
-    accounts = []
-    for separator in ['&', '\n']:
-        if separator in env_value:
-            parts = env_value.split(separator)
-            break
-    else:
-        parts = [env_value]
-    for account_str in parts:
-        account_str = account_str.strip()
-        if not account_str:
-            continue
-        parsed = parse_account_item(account_str)
-        if parsed:
-            accounts.append(parsed)
-    return accounts
-
-
-# ============================================================
-# 登录（返回凭证，不依赖验证码）
-# ============================================================
-def login(phone: str, password: str) -> Optional[dict]:
-    """仅使用手机号+密码登录，返回凭证字典。与验证码完全解耦。"""
+def login_kuwo(username, password):
     try:
-        q, encrypted_dev_id = get_q(phone, password)
-        url = 'http://ar.i.kuwo.cn/US_NEW/kuwo/login_kw'
-        headers = {
-            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 10; MI 8 MIUI/V12.5.2.0.QEACNXM)',
-            'Accept': '*/*',
-            'Host': 'ar.i.kuwo.cn',
-            'Connection': 'Keep-Alive',
-            'Accept-Encoding': 'gzip',
-        }
-        response = requests.get(url, headers=headers, params={'f': 'ar', 'q': q}, timeout=10)
+        q, encrypted_dev_id = get_q(username, password)
+        response = requests.get(
+            'http://ar.i.kuwo.cn/US_NEW/kuwo/login_kw',
+            headers={'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 10; MI 8 MIUI/V12.5.2.0.QEACNXM)',
+                     'Accept': '*/*', 'Host': 'ar.i.kuwo.cn', 'Connection': 'Keep-Alive',
+                     'Accept-Encoding': 'gzip'},
+            params={'f': 'ar', 'q': q}, timeout=10
+        )
         set_cookie = response.headers.get('Set-Cookie', '')
-        username_match = re.search(r'uname3=([^;]+)', set_cookie)
-        sid_match = re.search(r'websid=([^;]+)', set_cookie)
-        uid_match = re.search(r'userid=([^;]+)', set_cookie)
-        account_match = re.search(r't3kwid=([^;]+)', set_cookie)
-        if not all([username_match, sid_match, uid_match, account_match]):
-            logger.warning(f"❌ 账号 {phone} 登录响应缺少必要 Cookie")
-            return None
-        return {
-            'phone': phone,
-            'loginUid': uid_match.group(1),
-            'loginSid': sid_match.group(1),
-            'appUid': account_match.group(1),
-            'encrypted_phone': encrypt_phone(phone),
-        }
+        m = {k: re.search(rf'{k}=([^;]+)', set_cookie) for k in ['uname3', 'websid', 'userid', 't3kwid']}
+        if all(m.values()):
+            return m['userid'].group(1), m['websid'].group(1), m['t3kwid'].group(1), encrypted_dev_id
+        return None
     except Exception as e:
-        logger.warning(f"❌ 账号 {phone} 登录异常: {e}")
+        logger.error(f"酷我登录异常: {e}")
         return None
 
 
-# ============================================================
-# 预连接：强制与提现域名建立 TCP/TLS 连接并放入 Session 池
-# ============================================================
-def prewarm_session(session: requests.Session, host: str = WITHDRAW_API_HOST) -> bool:
-    """使用 urllib3 的 connection_from_host 强制建连，不发业务请求。"""
+def check_withdraw_today(loginUid, loginSid, target_date_str=None):
     try:
-        adapter = session.get_adapter(f"https://{host}")
-        adapter.poolmanager.connection_from_host(host, port=443, scheme="https")
-        return True
-    except Exception as e:
-        logger.warning(f"⚠️ 预连接 {host} 失败: {e}")
+        resp = requests.get(
+            'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdrawDetails',
+            params={'loginUid': loginUid, 'loginSid': loginSid, 'pn': 1, 'rn': 10},
+            headers={'Host': 'integralapi.kuwo.cn', 'Accept': 'application/json, text/plain, */*',
+                     'Origin': 'https://h5app.kuwo.cn',
+                     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) '
+                                   'AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 '
+                                   'KWMusic/12.1.2.0 DeviceModel/iPhone18,3 NetType/WIFI kuwopage',
+                     'Referer': 'https://h5app.kuwo.cn/apps/earning-sign/bill.html',
+                     'Accept-Language': 'zh-CN,zh-Hans;q=0.9', 'Connection': 'keep-alive'},
+            timeout=5, verify=False
+        )
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+        if data.get('code') != 200:
+            return False
+        if target_date_str is None:
+            target_date_str = datetime.now().strftime('%Y-%m-%d')
+        for item in data.get('data', {}).get('list', []):
+            if item.get('createTime', '').startswith(target_date_str):
+                if item.get('status') == 1 or '提现成功' in item.get('description', ''):
+                    return True
+        return False
+    except Exception:
         return False
 
 
-def keepalive_session(session: requests.Session, host: str = WITHDRAW_API_HOST) -> None:
-    """整点前轻量保活，确保 keep-alive 连接未被回收。"""
+def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'):
     try:
-        session.head(f"https://{host}/", timeout=3, verify=False)
-    except Exception:
-        pass
+        resp = requests.get(
+            'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode',
+            params={'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone,
+                    'appuid': appUid, 'apiv': '9', 'terminal': '1',
+                    'quotaId': quota_id, 'type': 'blindBox'},
+            headers={'Host': 'integralapi.kuwo.cn', 'Connection': 'keep-alive',
+                     'Accept': 'application/json, text/plain, */*',
+                     'Origin': 'https://h5app.kuwo.cn',
+                     'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro Build/TKQ1.221114.001; wv) '
+                                   'AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 '
+                                   'Chrome/148.0.7778.120 Mobile Safari/537.36/ kuwopage',
+                     'Referer': 'https://h5app.kuwo.cn/'},
+            timeout=10, verify=False
+        )
+        data = resp.json()
+        return data.get('code') == 200, data.get('msg', '')
+    except Exception as e:
+        return False, str(e)
 
 
-# ============================================================
-# 提现请求（接受外部 Session，复用预热连接）
-# ============================================================
-def withdraw_confirm_once(
-    session: requests.Session,
-    phone: str,
-    loginUid: str,
-    loginSid: str,
-    appUid: str,
-    encrypted_phone: str,
-    code: str,
-    kwtxid: str,
-    verification_id: str,
-    q36: str,
-    seq: int = 1,
-    max_extra_retries: int = MAX_EXTRA_RETRIES,
-    retry_delay_ms: int = RETRY_DELAY_MS,
-) -> Tuple[List[str], str, bool]:
+# ======================================================================
+# 2. 提现请求（已修改：接受外部 session，复用预热连接）
+# ======================================================================
+def withdraw_confirm_once(session, phone, loginUid, loginSid, appUid,
+                          encrypted_phone, code, kwtxid, verification_id, q36,
+                          seq=1, max_extra_retries=3, retry_delay_ms=4000):
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw'
     params = {
-        'encry': '',
-        'type': 'highValue',
-        'quotaId': kwtxid,
-        'loginUid': loginUid,
-        'loginSid': loginSid,
-        'appuid': appUid,
-        'source': 'kwplayer_ar_12.1.4.0_meizu.apk',
-        'version': '1',
-        'phone': encrypted_phone,
-        'verificationId': verification_id,
-        'apiv': '9',
-        'code': code,
-        'platform': 'android',
-        'cliVersion': '12.1.4.0',
-        'q36': q36,
+        'encry': '', 'type': 'highValue', 'quotaId': kwtxid,
+        'loginUid': loginUid, 'loginSid': loginSid, 'appuid': appUid,
+        'source': 'kwplayer_ar_12.1.4.0_meizu.apk', 'version': '1',
+        'phone': encrypted_phone, 'verificationId': verification_id,
+        'apiv': '9', 'code': code, 'platform': 'android',
+        'cliVersion': '12.1.4.0', 'q36': q36,
     }
     headers = {
-        'Host': 'integralapi.kuwo.cn',
-        'Connection': 'keep-alive',
+        'Host': 'integralapi.kuwo.cn', 'Connection': 'keep-alive',
         'sec-ch-ua-platform': '"Android"',
         'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro Build/TKQ1.221114.001; wv) '
                       'AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 '
                       'Chrome/148.0.7778.120 Mobile Safari/537.36/ kuwopage',
         'Accept': 'application/json, text/plain, */*',
         'sec-ch-ua': '"Chromium";v="148", "Android WebView";v="148", "Not/A)Brand";v="99"',
-        'sec-ch-ua-mobile': '?1',
-        'Origin': 'https://h5app.kuwo.cn',
-        'X-Requested-With': 'cn.kuwo.player',
-        'Sec-Fetch-Site': 'same-site',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Dest': 'empty',
+        'sec-ch-ua-mobile': '?1', 'Origin': 'https://h5app.kuwo.cn',
+        'X-Requested-With': 'cn.kuwo.player', 'Sec-Fetch-Site': 'same-site',
+        'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty',
         'Referer': 'https://h5app.kuwo.cn/',
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -412,9 +305,8 @@ def withdraw_confirm_once(
                         f"| {resp.status_code} | {elapsed_ms:.1f}ms | {combined[:200]}")
             log_lines.append(line)
 
-            if FREQUENT_ERROR_KEYWORD in combined and attempt <= max_extra_retries:
-                log_lines.append(f"⚠️ {phone} 遭遇频繁错误（包含'{FREQUENT_ERROR_KEYWORD}'），"
-                                 f"{retry_delay_ms}ms 后重试...")
+            if "频繁" in combined and attempt <= max_extra_retries:
+                log_lines.append(f"⚠️ {phone} 遭遇频繁错误，{retry_delay_ms}ms 后重试...")
                 time.sleep(retry_delay_ms / 1000.0)
                 continue
 
@@ -438,429 +330,519 @@ def withdraw_confirm_once(
     return log_lines, last_combined if last_combined else "未知错误", False
 
 
-# ============================================================
-# 推送（保留你原有的 XTS_TOKEN 推送）
-# ============================================================
-def send_xtuis_notification(title: str, content: str) -> None:
-    token = os.getenv('XTS_TOKEN', '').strip()
-    if not token:
-        logger.info("⚠️ 虾推啥未配置（缺少 XTS_TOKEN），跳过推送")
-        return
-    if not title:
-        title = "酷我提现通知"
-    url = f"https://wx.xtuis.cn/{token}.send"
+# ======================================================================
+# 3. 预连接辅助函数（新增）
+# ======================================================================
+def prewarm_session(session: requests.Session, host: str = "integralapi.kuwo.cn") -> bool:
     try:
-        resp = requests.get(url, params={"text": title, "desp": content}, timeout=10)
-        if resp.status_code == 200:
-            logger.info("✅ 虾推啥推送通知发送成功")
-        else:
-            logger.warning(f"⚠️ 虾推啥推送通知发送失败: {resp.text[:100]}")
+        adapter = session.get_adapter(f"https://{host}")
+        adapter.poolmanager.connection_from_host(host, port=443, scheme="https")
+        return True
     except Exception as e:
-        logger.warning(f"⚠️ 虾推啥推送通知异常: {e}")
+        logger.warning(f"⚠️ 预连接 {host} 失败: {e}")
+        return False
 
 
-# ============================================================
-# 成功计数文件（保留）
-# ============================================================
-SUCCESS_COUNT_FILE = 'success_count.json'
-
-def load_success_data() -> dict:
-    if os.path.exists(SUCCESS_COUNT_FILE):
-        try:
-            with open(SUCCESS_COUNT_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                for phone, value in list(data.items()):
-                    if isinstance(value, int):
-                        data[phone] = {"limit": None, "count": value}
-                    elif isinstance(value, dict):
-                        value.setdefault("count", 0)
-                        value.setdefault("limit", None)
-                return data
-        except Exception:
-            return {}
-    return {}
-
-def save_success_data(data: dict) -> None:
-    with open(SUCCESS_COUNT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-# ============================================================
-# 数据库更新（保留）
-# ============================================================
-def update_kwtx_in_db(success_phones: List[str], db_path: str = DB_PATH,
-                      env_name: str = ENV_NAME_KWTX) -> None:
-    if not success_phones:
-        logger.info("ℹ️ 没有成功提现的账户，跳过更新 kwtx")
-        return
-    if not os.path.isfile(db_path):
-        logger.warning(f"⚠️ 数据库文件不存在: {db_path}，跳过更新 kwtx")
-        return
-
-    conn = sqlite3.connect(db_path)
+def keepalive_session(session: requests.Session, host: str = "integralapi.kuwo.cn") -> None:
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [row[0] for row in cursor.fetchall()]
-        target_table = None
-        for table in tables:
-            cursor.execute(f"PRAGMA table_info({table})")
-            cols = [col[1] for col in cursor.fetchall()]
-            if 'name' in cols and 'value' in cols:
-                target_table = table
-                break
-        if target_table is None:
-            logger.warning("⚠️ 未找到包含 name 和 value 列的表，跳过更新 kwtx")
-            return
-
-        cursor.execute(f"SELECT value FROM {target_table} WHERE name=?", (env_name,))
-        row = cursor.fetchone()
-        if not row:
-            logger.warning(f"⚠️ 环境变量 '{env_name}' 不存在，跳过更新")
-            return
-        old_value = row[0]
-
-        lines = old_value.splitlines()
-        new_lines = []
-        updated = False
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split('#')
-            if len(parts) < 2:
-                new_lines.append(line)
-                continue
-            phone = parts[0].strip()
-            if phone in success_phones:
-                if len(parts) >= 3 and parts[2].strip().isdigit():
-                    limit = int(parts[2].strip())
-                    if limit > 0:
-                        limit -= 1
-                        parts[2] = str(limit)
-                        updated = True
-                        logger.info(f"✅ 更新 {phone} 授权次数: 剩余 {limit} 次")
-                    else:
-                        logger.info(f"ℹ️ {phone} 授权次数已为 0，不再减少")
-                else:
-                    logger.info(f"ℹ️ {phone} 未配置授权次数，不修改")
-            new_lines.append('#'.join(parts))
-
-        if not updated:
-            logger.info("ℹ️ 无需更新 kwtx")
-            return
-
-        new_value = "\n".join(new_lines)
-        cursor.execute(f"UPDATE {target_table} SET value=? WHERE name=?", (new_value, env_name))
-        conn.commit()
-        conn.execute("PRAGMA wal_checkpoint(FULL)")
-        logger.info("✅ 数据库 kwtx 更新成功")
-    except Exception as e:
-        logger.warning(f"⚠️ 更新 kwtx 出错: {e}")
-    finally:
-        conn.close()
-
-
-# ============================================================
-# 等待到下一个整点（毫秒级精确）
-# ============================================================
-def wait_until_next_hour() -> None:
-    now = datetime.now()
-    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    wait_seconds = (next_hour - now).total_seconds()
-    logger.info(f"当前时间: {now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
-    logger.info(f"目标整点: {next_hour.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
-    logger.info(f"等待 {wait_seconds:.6f} 秒")
-    if wait_seconds > 0.005:
-        time.sleep(wait_seconds - 0.005)
-    while datetime.now() < next_hour:
+        session.head(f"https://{host}/", timeout=3, verify=False)
+    except Exception:
         pass
 
 
-# ============================================================
-# AstrBot 插件类
-# ============================================================
-class KuwoWithdrawPlugin(Star):
+# ======================================================================
+# 4. 插件主类
+# ======================================================================
+class KuwoPlugin(Star):
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
-        self._code_map: Dict[str, str] = {}          # 手机号 -> 验证码（仅内存，零IO）
-        self._credential_cache: Dict[str, dict] = {}  # 手机号 -> 登录凭证
-        self._session_cache: Dict[str, requests.Session] = {}  # 手机号 -> 独立Session
-        self._lock = threading.Lock()
-        self._withdraw_thread: Optional[threading.Thread] = None
-        self._stop_event = threading.Event()
-        self._started = False
+        self.config = config or {}
+        self.default_auth_limit = self.config.get('default_auth_limit', 3)
+        self.verification_cron = self.config.get('default_verification_cron', "12 55 8,12,16,19 * * *")
+        self.default_withdraw_cron = self.config.get('default_withdraw_cron', "0 0 0,9,13,17,20 * * *")
+        self.verification_id = self.config.get('verification_id',
+            "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D")
+        self.q36 = self.config.get('q36', "a9441d902f38da7d2d25bf1f10001a319907")
+        self.kwtxid = self.config.get('kwtxid', "30002")
+        self.timeout = self.config.get('timeout', 120)
+        self.max_retries = self.config.get('max_retries', 3)
+        self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
+        self.quota_id = self.config.get('quota_id', "60004")
+        self.admin_qq = self.config.get('admin_qq', [])
 
-        logger.info(f"酷我提现插件 v{VERSION} 初始化完成")
+        self.states = {}
+        self.TIMEOUT = self.timeout
+        self.timeout_tasks = {}
+        self.scheduler_task = None
+        self.scheduler_running = False
+        self.num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+        self._last_trigger_time = {}
+        self._db_lock = asyncio.Lock()
+        self._code_cache_mem = {}
+        self._login_cache_mem = {}
+        self._time_offset = 0.0
+        self._time_offset_updated_at = 0.0
+        self._all_data_cache = None
+        self._cron_cache = {}
+        self._pre_login_tasks = {}
+        self._session_local = threading.local()
+        self._withdraw_warmed_at = 0.0
 
-    # ---------- 验证码提交：仅更新字典，零网络 IO ----------
-    @filter.command("kwtx_code")
-    async def submit_code(self, event: AstrMessageEvent):
-        """提交验证码，格式：/kwtx_code 手机号#验证码"""
-        text = event.message_str.strip()
-        if '#' not in text:
-            yield event.plain_result("格式错误，请使用：/kwtx_code 手机号#验证码")
-            return
-        phone, code = text.split('#', 1)
-        phone, code = phone.strip(), code.strip()
-        if not phone or not code:
-            yield event.plain_result("手机号或验证码为空")
-            return
-        with self._lock:
-            self._code_map[phone] = code
-        logger.info(f"📱{phone} 验证码已记录，将在整点发射时使用")
-        yield event.plain_result(f"验证码已记录（{phone}），将在整点发射时使用。")
-
-    # ---------- 启动提现循环 ----------
-    @filter.command("kwtx_start")
-    async def start_withdraw_loop(self, event: AstrMessageEvent):
-        """启动后台提现循环（只需调用一次）"""
-        if self._started:
-            yield event.plain_result("提现循环已在运行中。")
-            return
-        self._started = True
-        self._stop_event.clear()
-        self._withdraw_thread = threading.Thread(
-            target=self._withdraw_loop, daemon=True, name="kuwo-withdraw-loop"
-        )
-        self._withdraw_thread.start()
-        yield event.plain_result("✅ 提现循环已启动，将在每个整点前自动登录、预连接并发射。")
-
-    # ---------- 停止 ----------
-    @filter.command("kwtx_stop")
-    async def stop_withdraw_loop(self, event: AstrMessageEvent):
-        """停止后台提现循环"""
-        self._stop_event.set()
-        if self._withdraw_thread and self._withdraw_thread.is_alive():
-            self._withdraw_thread.join(timeout=5)
-        self._started = False
-        self._close_all_sessions()
-        yield event.plain_result("🛑 提现循环已停止。")
-
-    # ---------- 生命周期 ----------
-    async def terminate(self):
-        self._stop_event.set()
-        if self._withdraw_thread and self._withdraw_thread.is_alive():
-            self._withdraw_thread.join(timeout=5)
-        self._close_all_sessions()
-        logger.info("酷我提现插件已终止")
-
-    def _close_all_sessions(self):
-        with self._lock:
-            for session in self._session_cache.values():
-                try:
-                    session.close()
-                except Exception:
-                    pass
-            self._session_cache.clear()
-            self._credential_cache.clear()
-
-    # ============================================================
-    # 后台提现主循环
-    # ============================================================
-    def _withdraw_loop(self):
-        """后台线程：每个整点前 3 分钟登录+预连接，整点并发发射。"""
-        while not self._stop_event.is_set():
+    # ---------- 数据持久化 ----------
+    async def _retry_db_call(self, coro_func, *args, max_retries=5, base_delay=0.5, **kwargs):
+        last_exc = None
+        for attempt in range(max_retries):
             try:
-                # 1. 等待到整点前 PREWARM_AHEAD_SECONDS
-                now = datetime.now()
-                next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-                prewarm_at = next_hour - timedelta(seconds=PREWARM_AHEAD_SECONDS)
-                wait = (prewarm_at - now).total_seconds()
-                if wait > 0:
-                    logger.info(f"⏳ 等待至预连接时刻（{prewarm_at.strftime('%H:%M:%S')}）")
-                    if self._stop_event.wait(timeout=wait):
-                        break
-
-                # 2. 读取账户，后台登录 + 预连接（不依赖验证码）
-                accounts = get_accounts_from_env()
-                if not accounts:
-                    logger.warning("⚠️ 未读取到有效账号，跳过本整点")
-                    self._wait_until_next_hour_safe()
-                    continue
-
-                logger.info(f"🔐 开始为 {len(accounts)} 个账号登录并预连接...")
-                self._prepare_accounts(accounts)
-
-                if not self._credential_cache:
-                    logger.warning("⚠️ 没有账号登录成功，跳过本整点")
-                    self._wait_until_next_hour_safe()
-                    continue
-
-                # 3. 整点前 KEEPALIVE_AHEAD_SECONDS 保活
-                now2 = datetime.now()
-                keepalive_at = next_hour - timedelta(seconds=KEEPALIVE_AHEAD_SECONDS)
-                wait2 = (keepalive_at - now2).total_seconds()
-                if wait2 > 0:
-                    if self._stop_event.wait(timeout=wait2):
-                        break
-                self._keepalive_all()
-
-                # 4. 等待到整点（毫秒级精确）
-                wait_until_next_hour()
-
-                if self._stop_event.is_set():
-                    break
-
-                # 5. 整点并发发射
-                self._fire_withdraw(accounts)
-
+                return await coro_func(*args, **kwargs)
             except Exception as e:
-                logger.exception(f"❌ 提现循环异常: {e}")
-                self._wait_until_next_hour_safe()
+                last_exc = e
+                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                    wait = base_delay * (attempt + 1)
+                    logger.warning(f"⚠️ 数据库锁定，{wait:.1f}秒后重试（{attempt+1}/{max_retries}）")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
 
-    def _wait_until_next_hour_safe(self):
-        """异常后安全等待到下一个整点前，避免忙循环。"""
+    async def _load_all_data_unlocked(self) -> dict:
+        if self._all_data_cache is not None:
+            return self._all_data_cache
+        self._all_data_cache = await self._retry_db_call(self.get_kv_data, "kuwo_data", {})
+        return self._all_data_cache
+
+    async def _save_all_data_unlocked(self, data: dict):
+        await self._retry_db_call(self.put_kv_data, "kuwo_data", data)
+        self._all_data_cache = data
+
+    async def _load_all_data(self) -> dict:
+        async with self._db_lock:
+            return await self._load_all_data_unlocked()
+
+    async def _save_all_data(self, data: dict):
+        async with self._db_lock:
+            await self._save_all_data_unlocked(data)
+
+    def _get_default_user_data(self) -> dict:
+        return {
+            "accounts": [],
+            "auth_limit": self.default_auth_limit,
+            "daily_withdraw": {},
+            "verification_codes": {},
+            "cron": self.verification_cron,
+            "scheduled_job": {"cron": self.verification_cron, "enabled": True, "last_executed": None},
+            "withdraw_scheduled_job": {"cron": self.default_withdraw_cron, "enabled": True, "last_executed": None},
+            "last_withdraw_log": None,
+        }
+
+    async def _load_data(self, user_id: str) -> dict:
+        async with self._db_lock:
+            all_data = await self._load_all_data_unlocked()
+            if user_id not in all_data:
+                all_data[user_id] = self._get_default_user_data()
+                await self._save_all_data_unlocked(all_data)
+            return all_data[user_id]
+
+    async def _save_data(self, user_id: str, user_data: dict):
+        async with self._db_lock:
+            if "accounts" in user_data:
+                unique_dict = {}
+                for acc in user_data["accounts"]:
+                    phone = acc.get("phone")
+                    if phone:
+                        unique_dict[phone] = acc
+                user_data["accounts"] = list(unique_dict.values())
+            all_data = await self._load_all_data_unlocked()
+            all_data[user_id] = user_data
+            await self._save_all_data_unlocked(all_data)
+
+    async def _delete_user_data(self, user_id: str) -> bool:
+        async with self._db_lock:
+            all_data = await self._load_all_data_unlocked()
+            if user_id in all_data:
+                del all_data[user_id]
+                await self._save_all_data_unlocked(all_data)
+                return True
+            return False
+
+    # ---------- 状态管理 ----------
+    def _get_state(self, user_id: str) -> dict:
+        if user_id not in self.states:
+            self.states[user_id] = {'menu': None, 'step': None, 'last_active': time.time(), 'tmp_data': {}, 'umo': None}
+        return self.states[user_id]
+
+    def _update_state(self, user_id: str, **kwargs):
+        state = self._get_state(user_id)
+        state.update(kwargs)
+        state['last_active'] = time.time()
+
+    def _clear_state(self, user_id: str):
+        self.states.pop(user_id, None)
+        if user_id in self.timeout_tasks:
+            self.timeout_tasks[user_id].cancel()
+            del self.timeout_tasks[user_id]
+
+    def _cancel_timeout(self, user_id: str):
+        if user_id in self.timeout_tasks:
+            self.timeout_tasks[user_id].cancel()
+            del self.timeout_tasks[user_id]
+
+    async def _timeout_callback(self, user_id: str):
+        if user_id not in self.states:
+            return
+        state = self.states[user_id]
+        if state.get('menu') or state.get('step'):
+            umo = state.get('umo')
+            if umo:
+                try:
+                    await self.context.send_message(umo, MessageChain().message("⏰ 操作已超时，已退出交互。"))
+                except:
+                    pass
+        self._clear_state(user_id)
+
+    def _schedule_timeout(self, user_id: str):
+        if user_id in self.timeout_tasks:
+            self.timeout_tasks[user_id].cancel()
+        self.timeout_tasks[user_id] = asyncio.create_task(self._timeout_after_delay(user_id))
+
+    async def _timeout_after_delay(self, user_id: str):
         try:
-            wait_until_next_hour()
-        except Exception:
-            self._stop_event.wait(timeout=3600)
+            await asyncio.sleep(self.TIMEOUT)
+            await self._timeout_callback(user_id)
+        except asyncio.CancelledError:
+            pass
 
-    # ============================================================
-    # 登录 + 预连接（并发，每账号独立 Session）
-    # ============================================================
-    def _prepare_accounts(self, accounts: List[dict]):
-        with self._lock:
-            self._credential_cache.clear()
-            self._session_cache.clear()
+    def _get_effective_today_str(self) -> str:
+        now = datetime.now()
+        if now.hour >= 23:
+            return (now + timedelta(days=1)).strftime('%Y-%m-%d')
+        return now.strftime('%Y-%m-%d')
 
-        def prepare_one(acc: dict) -> Optional[Tuple[str, dict, requests.Session]]:
-            phone = acc['phone']
-            password = acc['password']
-            # 登录（不依赖验证码）
-            cred = login(phone, password)
-            if not cred:
-                return None
-            # 每个账号独立 Session，连接池足够容纳整点请求+重试
-            session = requests.Session()
-            adapter = HTTPAdapter(
-                pool_connections=2,
-                pool_maxsize=3,
-                max_retries=0,
+    # ---------- 菜单文本 ----------
+    async def _get_main_menu_text(self, user_id: str) -> str:
+        user_data = await self._load_data(user_id)
+        auth_limit = user_data.get('auth_limit', 0)
+        auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
+        return (f" 酷我菜单 (剩余授权: {auth_display})\n"
+                "1️⃣ 账号管理\n2️⃣ 获取验证码\n3️⃣ 提交验证码\n4️⃣ 提现\n0️⃣ 退出")
+
+    def _account_menu(self) -> str:
+        return " 账号管理\n1️⃣ 绑定账号\n2️⃣ 解绑账号\n3️⃣ 查看账号\n0️⃣ 返回主菜单"
+
+    def _verify_menu(self) -> str:
+        return " 获取验证码\n1️⃣ 立即获取\n2️⃣ 定时获取\n0️⃣ 返回主菜单"
+
+    async def _get_verify_timer_menu(self, user_id: str) -> str:
+        user_data = await self._load_data(user_id)
+        job = user_data.get('scheduled_job', {})
+        if bool(job.get('cron')) and job.get('enabled', False):
+            return (f"⏰ 定时获取验证码\n当前规则：{job.get('cron')} (已启用)\n"
+                    "1️⃣ 修改定时规则\n2️⃣ 删除定时规则\n3️⃣ 禁用/启用\n0️⃣ 返回")
+        else:
+            return ("⏰ 定时获取验证码\n当前未启用\n"
+                    "1️⃣ 设置定时规则\n0️⃣ 返回")
+
+    def _withdraw_menu(self) -> str:
+        return " 提现\n1️⃣ 立即提现\n2️⃣ 开启/停用整点提现\n0️⃣ 返回主菜单"
+
+    def _admin_menu(self) -> str:
+        return (" 酷我提现管理面板\n1️⃣ 查看所有账号\n2️⃣ 删除账号\n3️⃣ 修改授权次数（设置具体值或无限制）\n"
+                "4️⃣ 发送验证码（可指定用户和账号，输入 all 发送全部）\n5️⃣ 为指定用户绑定账号\n"
+                "6️⃣ 重置用户所有数据\n7️⃣ 查看最近提现记录\n0️⃣ 退出")
+
+    # ---------- 辅助方法 ----------
+    def _parse_phone_selection(self, text: str, accounts: list) -> tuple:
+        if text == "all":
+            return [acc["phone"] for acc in accounts], None
+        phones = []
+        try:
+            for idx_str in text.split(','):
+                idx = int(idx_str.strip()) - 1
+                if 0 <= idx < len(accounts):
+                    phones.append(accounts[idx]["phone"])
+                else:
+                    return None, f"❌ 序号 {idx_str} 无效，请重新输入"
+        except ValueError:
+            return None, "❌ 输入格式错误，请输入数字序号（用逗号分隔）或 all"
+        return phones, None
+
+    async def _send_codes_concurrently(self, phones: list, account_map: dict, check_today: bool = False) -> list:
+        task_phones = [p for p in phones if p in account_map]
+        missing = [p for p in phones if p not in account_map]
+        result_by_phone = {}
+        if task_phones:
+            task_results = await asyncio.gather(*[
+                asyncio.to_thread(self._send_code_for_phone_sync, p, account_map[p], check_today)
+                for p in task_phones
+            ])
+            for p, m, ok in task_results:
+                result_by_phone[p] = f"{'✅' if ok else '❌'} {p}: {m}"
+        for p in missing:
+            result_by_phone[p] = f"❌ {p}: 未找到密码"
+        return [result_by_phone[p] for p in phones if p in result_by_phone]
+
+    def _send_code_for_phone_sync(self, phone, password, check_today=False):
+        try:
+            login_result = login_kuwo(phone, password)
+            if not login_result:
+                return (phone, "登录失败", False)
+            loginUid, loginSid, appUid, encrypted_dev_id = login_result
+            if check_today and check_withdraw_today(loginUid, loginSid, self._get_effective_today_str()):
+                return (phone, "今日已提现，跳过", False)
+            success, msg = send_code_once(loginUid, loginSid, appUid, encrypt_phone(phone), self.quota_id)
+            return (phone, msg, success)
+        except Exception as e:
+            return (phone, f"异常: {e}", False)
+
+    # ---------- 命令入口 ----------
+    @filter.command("酷我")
+    async def kuwo_menu(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        self._clear_state(user_id)
+        self._update_state(user_id, menu='main', step=None, umo=event.unified_msg_origin)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(await self._get_main_menu_text(user_id))
+
+    @filter.command("酷我管理")
+    async def admin_panel_main(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        if user_id not in self.admin_qq:
+            yield event.plain_result("⛔ 您没有权限使用此命令。")
+            return
+        self._clear_state(user_id)
+        self._update_state(user_id, menu='admin', step=None, umo=event.unified_msg_origin)
+        self._schedule_timeout(user_id)
+        yield event.plain_result(self._admin_menu())
+
+    @filter.command("管理面板")
+    async def admin_panel_alias(self, event: AstrMessageEvent):
+        await self.admin_panel_main(event)
+
+    # ---------- 普通用户主菜单 ----------
+    @filter.regex(r'^[0-4]$')
+    async def handle_main_choice(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('menu') != 'main' or state.get('step'):
+            return
+        setattr(event, '_main_choice_processed', True)
+        self._cancel_timeout(user_id)
+        self._schedule_timeout(user_id)
+        text = event.message_str.strip()
+        if text == "0":
+            self._clear_state(user_id)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(" 已退出菜单")
+        elif text == "1":
+            self._update_state(user_id, menu='account', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._account_menu())
+        elif text == "2":
+            self._update_state(user_id, menu='verify', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._verify_menu())
+        elif text == "3":
+            user_data = await self._load_data(user_id)
+            if not user_data["accounts"]:
+                yield event.plain_result("❌ 您还没有绑定账号")
+                yield event.plain_result(await self._get_main_menu_text(user_id))
+                return
+            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
+            prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号，输入 0 取消："
+            self._schedule_timeout(user_id)
+            yield event.plain_result(prompt)
+            self._update_state(user_id, step='waiting_code_phone', tmp_data={'accounts': user_data["accounts"]})
+        elif text == "4":
+            self._update_state(user_id, menu='withdraw', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._withdraw_menu())
+
+    # ---------- 账号管理子菜单 ----------
+    @filter.regex(r'^[0-3]$')
+    async def handle_account_choice(self, event: AstrMessageEvent):
+        if getattr(event, '_main_choice_processed', False):
+            return
+        setattr(event, '_account_choice_processed', True)
+        user_id = event.get_sender_id()
+        state = self._get_state(user_id)
+        if state.get('menu') != 'account' or state.get('step'):
+            return
+        self._cancel_timeout(user_id)
+        self._schedule_timeout(user_id)
+        text = event.message_str.strip()
+        if text == "0":
+            self._update_state(user_id, menu='main', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(await self._get_main_menu_text(user_id))
+        elif text == "1":
+            self._update_state(user_id, step='binding')
+            self._schedule_timeout(user_id)
+            yield event.plain_result(" 请输入手机号#密码（可多个用 & 分隔），输入 0 取消")
+        elif text == "2":
+            user_data = await self._load_data(user_id)
+            if not user_data["accounts"]:
+                yield event.plain_result("❌ 您还没有绑定任何账号")
+                self._update_state(user_id, menu='account', step=None)
+                self._schedule_timeout(user_id)
+                yield event.plain_result(self._account_menu())
+                return
+            lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(user_data["accounts"])]
+            prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1），输入 0 取消："
+            self._schedule_timeout(user_id)
+            yield event.plain_result(prompt)
+            self._update_state(user_id, step='waiting_delete', tmp_data={'accounts': user_data["accounts"]})
+        elif text == "3":
+            user_data = await self._load_data(user_id)
+            if user_data["accounts"]:
+                lines = [f" {a['phone']}" for a in user_data["accounts"]]
+                auth_limit = user_data.get('auth_limit', 0)
+                auth_display = "无限制" if auth_limit == -1 else f"{auth_limit}次"
+                lines.append(f" 剩余授权次数：{auth_display}")
+                yield event.plain_result(" 您绑定的账号：\n" + "\n".join(lines))
+            else:
+                yield event.plain_result("❌ 您还没有绑定任何账号")
+            self._update_state(user_id, menu='account', step=None)
+            self._schedule_timeout(user_id)
+            yield event.plain_result(self._account_menu())
+
+    # ---------- 提现执行（核心修改区） ----------
+    async def _execute_withdraw(self, user_id: str, account_phones: list = None):
+        """
+        执行提现。核心修改：
+        - 为每个账号创建独立 requests.Session 并预连接。
+        - 整点前 30 秒保活。
+        - 并发发射时传入各自的 session。
+        其余逻辑（登录、授权扣减、推送）保持不变。
+        """
+        user_data = await self._load_data(user_id)
+        accounts = user_data.get("accounts", [])
+        if not accounts:
+            return "❌ 您还没有绑定账号"
+
+        target_accounts = accounts
+        if account_phones:
+            target_accounts = [a for a in accounts if a["phone"] in account_phones]
+        if not target_accounts:
+            return "❌ 没有可提现的账号"
+
+        # 1. 登录所有目标账号（复用原有 login_kuwo，不依赖验证码）
+        logged_in = {}
+        for acc in target_accounts:
+            phone = acc["phone"]
+            pwd = acc.get("password", "")
+            result = login_kuwo(phone, pwd)
+            if result:
+                loginUid, loginSid, appUid, encrypted_dev_id = result
+                logged_in[phone] = {
+                    "loginUid": loginUid,
+                    "loginSid": loginSid,
+                    "appUid": appUid,
+                    "encrypted_phone": encrypt_phone(phone),
+                }
+            else:
+                logger.warning(f"❌ {phone} 登录失败，跳过")
+
+        if not logged_in:
+            return "❌ 所有账号登录失败"
+
+        # 2. 为每个账号创建独立 Session 并预连接（并发）
+        sessions = {}
+        def _prepare_one(phone, cred):
+            s = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=2, pool_maxsize=3, max_retries=0
             )
-            session.mount("https://", adapter)
-            session.mount("http://", adapter)
-            # 强制与提现域名建立 TCP/TLS 连接
-            if not prewarm_session(session):
-                logger.warning(f"⚠️ {phone} 预连接失败，整点将使用冷连接")
-            return phone, cred, session
+            s.mount("https://", adapter)
+            s.mount("http://", adapter)
+            prewarm_session(s)
+            return phone, s
 
-        with ThreadPoolExecutor(max_workers=min(len(accounts), 8)) as executor:
-            futures = {executor.submit(prepare_one, acc): acc for acc in accounts}
-            for future in as_completed(futures):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(logged_in), 8)) as ex:
+            futures = {ex.submit(_prepare_one, p, c): p for p, c in logged_in.items()}
+            for f in concurrent.futures.as_completed(futures):
                 try:
-                    result = future.result(timeout=30)
+                    phone, s = f.result()
+                    sessions[phone] = s
                 except Exception as e:
-                    logger.warning(f"⚠️ 账号准备异常: {e}")
-                    continue
-                if result is None:
-                    continue
-                phone, cred, session = result
-                with self._lock:
-                    self._credential_cache[phone] = cred
-                    self._session_cache[phone] = session
-                logger.info(f"✅ {phone} 登录并预连接完成")
+                    logger.warning(f"⚠️ 预连接异常: {e}")
 
-    def _keepalive_all(self):
-        with self._lock:
-            sessions = dict(self._session_cache)
-        if not sessions:
-            return
-        logger.info(f"🔄 整点前保活 {len(sessions)} 个连接...")
-        with ThreadPoolExecutor(max_workers=len(sessions)) as executor:
-            list(executor.map(lambda s: keepalive_session(s), sessions.values()))
+        # 3. 等待到下一个整点（与原版 wait_until_next_hour 行为一致）
+        now = datetime.now()
+        next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        wait_sec = (next_hour - now).total_seconds()
 
-    # ============================================================
-    # 整点并发发射
-    # ============================================================
-    def _fire_withdraw(self, accounts: List[dict]):
-        kwtxid = os.getenv('kwtxid', '').strip() or "30002"
-        verification_id = os.getenv('VERIFICATION_ID', '').strip() or DEFAULT_VERIFICATION_ID
-        q36 = os.getenv('Q36', '').strip() or DEFAULT_Q36
+        # 整点前 30 秒保活
+        keepalive_at = next_hour - timedelta(seconds=30)
+        keepalive_wait = (keepalive_at - datetime.now()).total_seconds()
+        if keepalive_wait > 0:
+            await asyncio.sleep(keepalive_wait)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(sessions) or 1) as ex:
+            list(ex.map(lambda s: keepalive_session(s), sessions.values()))
+        logger.info(f"🔄 整点前保活完成 ({len(sessions)} 个连接)")
 
-        # 从环境变量重新读取 limit（以最新 kwtx 为准）
-        limit_map = {acc['phone']: acc.get('limit') for acc in accounts}
+        # 精确等待到整点
+        remaining = (next_hour - datetime.now()).total_seconds()
+        if remaining > 0.005:
+            await asyncio.sleep(remaining - 0.005)
+        while datetime.now() < next_hour:
+            pass
 
-        # 过滤：有凭证 + 有验证码 + 未达上限
-        success_data = load_success_data()
-        ready = []
-        skipped = []
-        for phone, cred in self._credential_cache.items():
-            code = self._code_map.get(phone)
+        # 4. 整点并发发射（传入各自的 session）
+        codes = user_data.get("verification_codes", {})
+        results = []
+        def _fire(phone, cred):
+            code = codes.get(phone, {}).get("code", "")
             if not code:
-                logger.warning(f"⚠️ {phone} 整点前未提交验证码，跳过")
-                skipped.append(phone)
-                continue
-            limit = limit_map.get(phone)
-            stored = success_data.get(phone, {})
-            stored_limit = stored.get('limit')
-            stored_count = stored.get('count', 0)
-            if stored_limit != limit:
-                stored_count = 0
-                success_data[phone] = {"limit": limit, "count": 0}
-            if limit is not None and stored_count >= limit:
-                logger.info(f"⏭️ {phone} 已达授权上限（{stored_count}/{limit}），跳过")
-                skipped.append(phone)
-                continue
-            ready.append((phone, cred, code))
-        save_success_data(success_data)
+                return (phone, "❌ 无验证码", False, [])
+            s = sessions.get(phone) or requests.Session()
+            log_lines, final, ok = withdraw_confirm_once(
+                s, phone, cred["loginUid"], cred["loginSid"],
+                cred["appUid"], cred["encrypted_phone"], code,
+                self.kwtxid, self.verification_id, self.q36,
+                seq=1, max_extra_retries=self.max_retries,
+                retry_delay_ms=self.retry_delay_ms,
+            )
+            return (phone, final, ok, log_lines)
 
-        if not ready:
-            logger.warning("⚠️ 整点没有可发射的账户（缺少验证码或已达上限）")
-            return
-
-        logger.info(f"🚀 整点发射：{len(ready)} 个账户并发提现（另有 {len(skipped)} 个跳过）")
-
-        results = {}
-        with ThreadPoolExecutor(max_workers=len(ready)) as executor:
-            future_to_phone = {}
-            for idx, (phone, cred, code) in enumerate(ready, 1):
-                session = self._session_cache.get(phone)
-                if session is None:
-                    logger.warning(f"⚠️ {phone} 无预连接 Session，使用普通请求")
-                    session = requests.Session()
-                future = executor.submit(
-                    withdraw_confirm_once,
-                    session, phone, cred['loginUid'], cred['loginSid'],
-                    cred['appUid'], cred['encrypted_phone'], code,
-                    kwtxid, verification_id, q36, idx,
-                )
-                future_to_phone[future] = phone
-
-            for future in as_completed(future_to_phone):
-                phone = future_to_phone[future]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(logged_in)) as ex:
+            future_map = {ex.submit(_fire, p, c): p for p, c in logged_in.items()}
+            for f in concurrent.futures.as_completed(future_map):
                 try:
-                    log_lines, final_result, is_success = future.result(timeout=60)
-                    results[phone] = (log_lines, final_result, is_success)
+                    results.append(f.result())
                 except Exception as e:
-                    results[phone] = ([f"❌ 账号处理异常: {e}"], f"异常: {e}", False)
+                    phone = future_map[f]
+                    results.append((phone, f"异常: {e}", False, []))
 
-        # 输出日志
-        success_phones = []
-        summaries = []
-        for phone, (log_lines, final_result, is_success) in results.items():
+        # 5. 汇总日志、扣减授权、保存（沿用原版逻辑）
+        success_phones = [r[0] for r in results if r[2]]
+        summary_lines = []
+        for phone, final, ok, log_lines in results:
             for line in log_lines:
                 logger.info(line)
-            logger.info(f"📱{phone} 最终结果: {final_result[:200]}")
-            if is_success:
-                success_phones.append(phone)
-            summaries.append(f"📱{phone}: {final_result[:80]}")
+            summary_lines.append(f"{'✅' if ok else '❌'} {phone}: {final[:100]}")
+            logger.info(f"📱{phone} 最终结果: {final[:200]}")
 
-        # 更新计数
-        success_data = load_success_data()
-        for phone in success_phones:
-            entry = success_data.setdefault(phone, {"limit": limit_map.get(phone), "count": 0})
-            entry["count"] = entry.get("count", 0) + 1
-        save_success_data(success_data)
+        # 扣减授权次数（仅成功时）
+        if success_phones:
+            current_limit = user_data.get("auth_limit", 0)
+            if current_limit != -1:
+                deduct = len(success_phones)
+                user_data["auth_limit"] = max(0, current_limit - deduct)
+            user_data["last_withdraw_log"] = "\n".join(summary_lines)
+            await self._save_data(user_id, user_data)
 
-        # 更新数据库 kwtx
-        update_kwtx_in_db(success_phones)
+        # 关闭本次临时 Session（共享的 _shared_session 不关闭）
+        for s in sessions.values():
+            try:
+                s.close()
+            except Exception:
+                pass
 
-        # 推送
-        if summaries:
-            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            content = f"共 {len(summaries)} 项结果:\n" + "\n".join(summaries) + f"\n脚本版本: {VERSION}"
-            send_xtuis_notification(f"酷我提现 {now_str}", content)
+        return "\n".join(summary_lines) if summary_lines else "本整点无提现结果"
 
-        logger.info("🏁 本整点提现发射完毕")
+
+# ======================================================================
+# 版本号
+# ======================================================================
+VERSION = "2.7.0"
