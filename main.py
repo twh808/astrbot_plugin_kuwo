@@ -235,7 +235,7 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002'
             combined = text
         lower_text = (text + str(data.get('msg', '')) + str(data.get('data', {}).get('description', ''))).lower()
         ok = '发送成功' in lower_text
-        # 发码成功时，响应里带本次验证码对应的 verificationId（提现必须用本次值，写死旧值会被服务器判"验证码已过期"）
+        # 发码成功时，响应里带本次验证码对应的 verificationId（可能是 body 字段，也可能在响应头）
         vid = ""
         if ok:
             _d = data.get('data') if isinstance(data.get('data'), dict) else {}
@@ -248,6 +248,13 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002'
                     if data.get(_k):
                         vid = str(data[_k])
                         break
+            if not vid:
+                for _hk, _hv in resp.headers.items():
+                    if _hk.lower().replace('-', '') in ('verificationid', 'verifyid', 'vid') and _hv:
+                        vid = str(_hv)
+                        break
+            # 诊断：响应头 + body 全打出来，确认 verificationId 的真实位置
+            logger.info(f"📨 sendCode 响应头: {dict(resp.headers)} | body: {text[:260]}")
         return ok, combined, vid
     except Exception as e:
         return False, str(e), ""
@@ -1640,16 +1647,39 @@ class KuwoPlugin(Star):
                 _overhead = self._send_overhead if next_typ == 'withdraw' else 0.0
                 _wrtt_cur = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) if next_typ == 'withdraw' else 0.0
                 fire_target = next_ts + _arrive_next - (_wrtt_cur / 2) - _overhead
+                _bw_start = time.time()
+                logger.info(
+                    f"⏱️ 进入发令等待: 类型 {next_typ}, 目标 {next_time.strftime('%H:%M:%S')}, "
+                    f"发令时刻 {time.strftime('%H:%M:%S.%f', time.localtime(fire_target))[:-3]}(本地口径), "
+                    f"距发令 {fire_target - (time.time() + self._time_offset):.3f}s, "
+                    f"RTT/2 {_wrtt_cur/2*1000:.1f}ms, 开销 {_overhead*1000:.1f}ms"
+                )
+                _bw_deadline = time.time() + max(next_ts - time.time(), 0) + 5
                 while self.scheduler_running:
                     now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
                     r = fire_target - now_ref
                     if r <= 0.0005:
                         break
-                    if r > 0.05:
-                        await asyncio.sleep(min(r - 0.03, 0.5))
+                    if time.time() > _bw_deadline:
+                        logger.warning(f"⚠️ 发令等待超过上限（目标 {next_time.strftime('%H:%M:%S')}），强制退出")
+                        break
+                    if r > 0.1:
+                        await asyncio.sleep(min(r - 0.08, 0.2))
                     else:
-                        # 最后 50ms 用 sleep(0) 高频重试，避免 Windows asyncio.sleep 精度差导致晚 15~80ms
+                        # 最后 100ms 用 sleep(0) 高频重试，避免 asyncio.sleep 精度差导致晚 15~80ms
                         await asyncio.sleep(0)
+
+                _bw_elapsed = time.time() - _bw_start
+                _bw_late = (time.time() + self._time_offset) - fire_target
+                if _bw_late > 0.15:
+                    logger.warning(
+                        f"⚠️ 发令等待醒来偏晚 {_bw_late*1000:.0f}ms（实际等待 {_bw_elapsed:.3f}s），事件循环可能有阻塞"
+                    )
+                else:
+                    logger.info(
+                        f"⏱️ 发令等待结束: 等待 {_bw_elapsed:.3f}s, 本地 {datetime.now().strftime('%H:%M:%S.%f')[:-3]}, "
+                        f"偏晚 {_bw_late*1000:.0f}ms"
+                    )
 
                 fired = []
                 for nt, uid, typ, udata in events:
@@ -1673,6 +1703,10 @@ class KuwoPlugin(Star):
                     if _wait_left > 0:
                         await asyncio.sleep(min(_wait_left + 0.002, 0.5))
                     else:
+                        logger.warning(
+                            f"⚠️ 已到发令时刻但未触发（目标 {next_time.strftime('%H:%M:%S')}，"
+                            f"晚 {- _wait_left*1000:.0f}ms），等到期兜底"
+                        )
                         await asyncio.sleep(0.05)
                     continue
 
