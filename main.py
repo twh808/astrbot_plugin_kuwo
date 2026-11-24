@@ -23,8 +23,8 @@ from astrbot.api import logger
 
 VERSION = "2.7.0"
 
-# 提现请求到达服务器 = 整点后多少秒；默认 0 = 整点立马发送，不等待
-ARRIVE_AFTER = float(os.getenv('ARRIVE_AFTER', '0'))
+# 提现请求到达服务器 = 整点后多少秒；5.0 = 整点后 5 秒开始发（写死，不读环境变量）
+ARRIVE_AFTER = 5.0
 
 # ======================================================================
 # 1. 加密常量
@@ -212,12 +212,22 @@ def check_withdraw_today(loginUid, loginSid, target_date_str=None):
     except Exception:
         return False
 
-def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002'):
+def _gen_verification_id() -> str:
+    """生成一次发码用的 verificationId（对齐真机格式：46字节随机 → base64(64字符, ==结尾) → URL编码一次，
+    requests 发参时再编码一次，最终请求里是 %253D%253D 结尾的形态）。"""
+    import base64 as _b64
+    import urllib.parse as _up
+    return _up.quote(_b64.b64encode(os.urandom(46)).decode(), safe='')
+
+def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002', verification_id=''):
     try:
+        params = {'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone, 'appuid': appUid,
+                  'apiv': '9', 'terminal': '1', 'quotaId': quota_id, 'type': 'highValue'}
+        if verification_id:
+            params['verificationId'] = verification_id
         resp = requests.get(
             'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode',
-            params={'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone, 'appuid': appUid,
-                    'apiv': '9', 'terminal': '1', 'quotaId': quota_id, 'type': 'highValue'},
+            params=params,
             headers={'Host': 'integralapi.kuwo.cn', 'Connection': 'keep-alive',
                      'Accept': 'application/json, text/plain, */*',
                      'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro; wv) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Mobile Safari/537.36 kuwopage',
@@ -572,13 +582,22 @@ class KuwoPlugin(Star):
             uid, sid, appuid, _ = login
             if check_today and check_withdraw_today(uid, sid, self._get_effective_today_str()):
                 return (phone, "今日已提现，跳过", False)
-            success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id)
+            # 发码时自带客户端生成的 verificationId（真机就是客户端生成、发码提交、提现配对）；
+            # 服务器不认时回退老参重发一次，保证发码不受影响
+            _vid_new = _gen_verification_id()
+            success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id, _vid_new)
+            if not success:
+                logger.warning(f"⚠️ {phone} 带自生成 verificationId 发码失败({msg})，回退无vid重发")
+                success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id, '')
+                if success:
+                    _vid_new = ''
             if success:
-                if vid:
-                    self._verification_id_mem[phone] = {"vid": vid, "expire": time.time() + 600}
-                    msg = f"{msg} (vid:{vid[:10]}...)"
+                _vid_use = vid or _vid_new
+                if _vid_use:
+                    self._verification_id_mem[phone] = {"vid": _vid_use, "expire": time.time() + 600}
+                    msg = f"{msg} (vid:{_vid_use[:10]}...)"
                 else:
-                    logger.warning(f"⚠️ {phone} 发码响应未返回 verificationId，提现将回退配置旧值")
+                    logger.warning(f"⚠️ {phone} 无可用 verificationId，提现将回退配置旧值")
             return (phone, msg, success)
         except Exception as e:
             return (phone, f"异常: {e}", False)
@@ -1616,8 +1635,8 @@ class KuwoPlugin(Star):
                     asyncio.create_task(self._warm_up_withdraw())
                     self._withdraw_warmed_at = time.time()
 
-                # 【新增】整点前 5~30 秒：预登录所有目标账号（每个提现任务只做一次）
-                if next_typ == 'withdraw' and 5 <= delay <= 30:
+                # 【新增】整点前 1~30 秒：预登录所有目标账号（每个提现任务只做一次）
+                if next_typ == 'withdraw' and 1 <= delay <= 30:
                     task_key = f"{next_uid}_{next_time.strftime('%Y%m%d%H%M')}"
                     if self._prelogin_task_key != task_key:
                         self._prelogin_task_key = task_key
@@ -1625,14 +1644,14 @@ class KuwoPlugin(Star):
                         asyncio.create_task(self._pre_login_for_withdraw(next_uid, next_udata))
 
                 # 每场触发前实测提现接口路径往返（与预登录同窗口，每场一次，本场网络，不跨场）
-                if next_typ == 'withdraw' and 5 <= delay <= 30:
+                if next_typ == 'withdraw' and 1 <= delay <= 30:
                     _wprobe_key = next_time.strftime('%Y%m%d%H%M')
                     if self._withdraw_path_probed_key != _wprobe_key:
                         self._withdraw_path_probed_key = _wprobe_key
                         self._withdraw_probe_task = asyncio.create_task(self._probe_withdraw_path_rtt())
 
                 # 每场触发前空跑一次，测本场发送开销（不和上一场混）
-                if next_typ == 'withdraw' and 5 <= delay <= 20:
+                if next_typ == 'withdraw' and 1 <= delay <= 20:
                     _probe_key = next_time.strftime('%Y%m%d%H%M')
                     if self._overhead_probed_key != _probe_key:
                         self._overhead_probed_key = _probe_key
@@ -1664,7 +1683,7 @@ class KuwoPlugin(Star):
                     f"距发令 {fire_target - (time.time() + self._time_offset):.3f}s, "
                     f"RTT/2 {_wrtt_cur/2*1000:.1f}ms, 开销 {_overhead*1000:.1f}ms"
                 )
-                _bw_deadline = time.time() + max(next_ts - time.time(), 0) + 5
+                _bw_deadline = time.time() + max(next_ts - time.time(), 0) + ARRIVE_AFTER + 5
                 while self.scheduler_running:
                     now_ref = (time.time() + self._time_offset) if next_typ == 'withdraw' else time.time()
                     r = fire_target - now_ref
