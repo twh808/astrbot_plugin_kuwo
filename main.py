@@ -348,6 +348,7 @@ class KuwoPlugin(Star):
         # 提现接口路径的本场实测往返（触发前探测，每场重置，不跨场）
         self._withdraw_path_rtt = 0.0
         self._withdraw_path_probed_key = None
+        self._withdraw_probe_task = None
         self._fired_marks = set()
         self._all_data_cache = None
         self._cron_cache = {}
@@ -1628,7 +1629,7 @@ class KuwoPlugin(Star):
                     _wprobe_key = next_time.strftime('%Y%m%d%H%M')
                     if self._withdraw_path_probed_key != _wprobe_key:
                         self._withdraw_path_probed_key = _wprobe_key
-                        asyncio.create_task(self._probe_withdraw_path_rtt())
+                        self._withdraw_probe_task = asyncio.create_task(self._probe_withdraw_path_rtt())
 
                 # 每场触发前空跑一次，测本场发送开销（不和上一场混）
                 if next_typ == 'withdraw' and 5 <= delay <= 20:
@@ -1640,6 +1641,15 @@ class KuwoPlugin(Star):
                                 await self._probe_send_overhead(_uid2)
                                 if self._send_overhead > 0:
                                     break
+
+                # 探测任务通常 1 秒内完成；发令前先等它，确保 fire_target 用的是提现路径真实 RTT
+                if next_typ == 'withdraw':
+                    _pt = self._withdraw_probe_task
+                    if _pt is not None and not _pt.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(_pt), timeout=1.5)
+                        except Exception:
+                            pass
 
                 next_ts = next_time.timestamp()
                 _arrive_next = ARRIVE_AFTER if next_typ == 'withdraw' else 0.0
@@ -1686,14 +1696,31 @@ class KuwoPlugin(Star):
                     now_ref = (time.time() + self._time_offset) if typ == 'withdraw' else time.time()
                     _arrive = ARRIVE_AFTER if typ == 'withdraw' else 0.0
                     _rr = 0.0
+                    _oh = 0.0
                     if typ == 'withdraw':
-                        _rr = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) / 2
+                        # 必须与本场 fire_target 用同一份 RTT 快照（_wrtt_cur），
+                        # 否则探测任务在等待期间完成、RTT 变小，判定会要求比发令点更晚，整场静默丢失
+                        _rr = _wrtt_cur / 2
+                        _oh = _overhead
                     ident = (uid, typ, int(nt.timestamp()))
-                    if now_ref >= nt.timestamp() + _arrive - _rr - _overhead - 0.005:
+                    if now_ref >= nt.timestamp() + _arrive - _rr - _oh - 0.005:
                         if ident in self._fired_marks:
                             continue
                         self._fired_marks.add(ident)
                         fired.append((nt, uid, typ, udata))
+
+                # 兜底：已到发令点却仍为空（任何 RTT/时钟异常），强制触发本场提现，绝不让整点请求丢失
+                if not fired and next_typ == 'withdraw' and (time.time() + self._time_offset) >= fire_target:
+                    for nt, uid, typ, udata in events:
+                        if typ != 'withdraw':
+                            continue
+                        ident = (uid, typ, int(nt.timestamp()))
+                        if ident in self._fired_marks:
+                            continue
+                        self._fired_marks.add(ident)
+                        fired.append((nt, uid, typ, udata))
+                    if fired:
+                        logger.warning(f"⚠️ 已到发令点但常规判定为空，强制触发 {len(fired)} 个提现任务")
 
                 if not fired:
                     # 本场已提前 RTT/2 触发过（fired_marks 命中），但服务器时间还没到整点，
@@ -1713,7 +1740,7 @@ class KuwoPlugin(Star):
                 for nt, uid, typ, udata in fired:
                     _eta = None
                     if typ == 'withdraw':
-                        _wrtt_eta = (self._withdraw_path_rtt if self._withdraw_path_rtt > 0 else self._rtt) / 2
+                        _wrtt_eta = _wrtt_cur / 2
                         _eta = time.time() + self._time_offset + _wrtt_eta + _overhead
                     logger.info(
                         f"⏰ 触发准时任务: 用户 {uid}, 类型 {typ}, 目标 {nt.strftime('%H:%M:%S')}, "
