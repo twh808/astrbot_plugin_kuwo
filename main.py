@@ -273,7 +273,7 @@ FREQUENT_ERROR_KEYWORD = "频繁"
 
 def withdraw_confirm_once(session, phone, loginUid, loginSid, appUid, encrypted_phone, code, kwtxid, verification_id, q36, seq=1, max_extra_retries=3, retry_delay_ms=4000):
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw'
-    params = {'encry': '', 'type': 'highValue', 'quotaId': kwtxid, 'loginUid': loginUid, 'loginSid': loginSid,
+    params = {'encry': '', 'type': '', 'quotaId': kwtxid, 'loginUid': loginUid, 'loginSid': loginSid,
               'appuid': appUid, 'source': 'kwplayer_ar_12.1.4.0_meizu.apk', 'version': '1', 'phone': encrypted_phone,
               'verificationId': verification_id, 'apiv': '9', 'code': code, 'platform': 'android',
               'cliVersion': '12.1.4.0', 'q36': q36}
