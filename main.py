@@ -274,16 +274,15 @@ FREQUENT_ERROR_KEYWORD = "频繁"
 def withdraw_confirm_once(session, phone, loginUid, loginSid, appUid, encrypted_phone, code, kwtxid, verification_id, q36, seq=1, max_extra_retries=3, retry_delay_ms=4000):
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw'
     params = {'encry': '', 'type': '', 'quotaId': kwtxid, 'loginUid': loginUid, 'loginSid': loginSid,
-              'appuid': appUid, 'source': 'kwplayer_ar_12.1.4.0_meizu.apk', 'version': '1', 'phone': encrypted_phone,
-              'verificationId': verification_id, 'apiv': '9', 'code': code, 'platform': 'android',
-              'cliVersion': '12.1.4.0', 'q36': q36}
-    headers = {'Host': 'integralapi.kuwo.cn', 'Connection': 'keep-alive', 'sec-ch-ua-platform': '"Android"',
-               'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro; wv) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.120 Mobile Safari/537.36 kuwopage',
-               'Accept': 'application/json, text/plain, */*',
-               'sec-ch-ua': '"Chromium";v="148", "Android WebView";v="148", "Not/A)Brand";v="99"',
-               'sec-ch-ua-mobile': '?1', 'Origin': 'https://h5app.kuwo.cn', 'X-Requested-With': 'cn.kuwo.player',
-               'Referer': 'https://h5app.kuwo.cn/', 'Accept-Encoding': 'gzip, deflate, br, zstd',
-               'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7'}
+              'appuid': appUid, 'source': 'kwplayer_ip_12.1.2.0_TJ.ipa', 'version': '1', 'phone': encrypted_phone,
+              'verificationId': verification_id, 'apiv': '9', 'code': code, 'platform': 'ios',
+              'cliVersion': '12.1.2.0', 'q36': q36}
+    headers = {'Host': 'integralapi.kuwo.cn', 'Accept': 'application/json, text/plain, */*',
+               'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 KWMusic/12.1.2.0 DeviceModel/iPhone18,3 NetType/WWAN kuwopage',
+               'Origin': 'https://h5app.kuwo.cn', 'Referer': 'https://h5app.kuwo.cn/',
+               'Accept-Encoding': 'gzip, deflate, br', 'Connection': 'keep-alive',
+               'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Dest': 'empty',
+               'Accept-Language': 'zh-CN,zh-Hans;q=0.9'}
     log_lines, last_combined = [], ""
     for attempt in range(1, max_extra_retries + 2):
         try:
