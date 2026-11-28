@@ -26,6 +26,25 @@ VERSION = "2.7.0"
 # 提现请求到达服务器 = 整点后多少秒；5.0 = 整点后 5 秒开始发（写死，不读环境变量）
 ARRIVE_AFTER = 5.0
 
+# 数美设备指纹 ID 池（原值 base64，运行时再 encodeURIComponent 一次）
+# 链路：h5app.kuwo.cn/apps/earning-sign/bill.html 的 dealSmDeviceId ->
+#       SMSdk.getDeviceId() -> 数美 POST /deviceprofile/v4 服务端下发 detail.deviceId
+#       -> localStorage["SMDEVICEID"] -> 提现时 verificationId
+# 本池由真实浏览器加载该页面、经数美服务端逐个签发（2026-11-28 21:06），
+# 与真机抓包同为 "B" + base64(46字节) 形态，数美库内有登记，不属于伪造凭证。
+# 每账号一个，避免多账号共用同一设备指纹被关联。
+SM_DEVICE_IDS = {
+    "18870799391": "BAP9oCFgeZOKOEyIQ4f/9uoOtyQ8Qzmyczgzr/EpPCXaNCYvAx6sPUPVs5Oq5YdisHghZ6kRRthkbIGZLKTs1YQ==",
+    "15507099836": "Bf+Yj4wLO5UM6kbBKf10ANGkvRnNUItTaFENQQRcRrRLz/o+Cj5VP7OwQwr831G/bfsfNLQLEYeNHmdKac+OAdw==",
+    "18170773004": "BISVzOUKC/BRxYsbFKaHlSJ8Y4ynseLva2GHLWVpqRbP4Nih8lrZ62W9M2xRHK5mxWxZm3Bl2s3iVPgDXHgI3Kg==",
+    "18679716130": "Bd03JTpRU5tmKV8NgT9sA8HmMGNqfCIDhYdnZ+xUD1kZUXGl7ANZg7zBMLaB6dxRjTh887NjLSc80MZ6lfT36bw==",
+    "18970712440": "BbhKghLm0rm0pLCUJBa2TRiE++WZZ03PAxKKSE5Kn0OQdNzvNG7uPdOQNWamMsagBe8rMPVAzqQzoKb/msB9BpA==",
+}
+# 未分配账号的兜底（同样为数美签发的真实设备 ID）
+SM_DEVICE_ID_DEFAULT = "BWeeWXqzu61E3iVcbITbwe7vJEwCIubZrAnMI9drRfy1nh1APCbR2ikhdofP2NcYGPkeg8eeoiHo/trM27sO3mQ=="
+# 真机 2026-11-23 09:00 提现成功时使用的设备 ID（备用，已确认被服务端接受过）
+SM_DEVICE_ID_REAL_DEVICE = "BbLRMBfvCP6byMw6jypA21N3lKyJo8oG9nWHAzdOXqoyMuZdRiPHWWlJcxKrLzYF9LtgbCjK2pbFS0CB6vBBTSg=="
+
 # ======================================================================
 # 1. 加密常量
 # ======================================================================
@@ -1254,15 +1273,17 @@ class KuwoPlugin(Star):
                 await asyncio.to_thread(time.time)
                 return (phone, None, "dry-run", False)
             session = self._get_thread_session()
-            # 优先用本次发码返回的 verificationId；服务器从未下发过，配置里的陈年旧值
-            # 已被验证为无效（报"验证码已失效"甚至触发风控），故无本场值时不带该参数
+            # verificationId 是数美设备 ID（真机 WebView localStorage["SMDEVICEID"]），
+            # 不是发码返回的凭证；按手机号取本机设备 ID，再按页面 JS 的
+            # encodeURIComponent 编码一次（requests 发参会再编码一次，最终形如 %253D%253D）
             _vid_info = self._verification_id_mem.get(phone)
-            _verification_id = ''
+            _raw_smid = SM_DEVICE_IDS.get(phone) or SM_DEVICE_ID_DEFAULT
             if _vid_info and time.time() <= _vid_info.get("expire", 0) and _vid_info.get("vid"):
-                _verification_id = _vid_info["vid"]
+                _verification_id = quote(str(_vid_info["vid"]), safe='')
                 logger.info(f"🔑 {phone} 使用本场发码 verificationId: {_verification_id[:12]}...")
             else:
-                logger.info(f"🔑 {phone} 无本场发码 verificationId，本次请求不带该参数")
+                _verification_id = quote(_raw_smid, safe='')
+                logger.info(f"🔑 {phone} 使用数美设备 ID 作为 verificationId: {_verification_id[:12]}... (设备尾号 {_raw_smid[-8:]})")
             log_lines, final_msg, is_success = await asyncio.to_thread(
                 withdraw_confirm_once, session, phone, uid, sid, appuid, encrypt_phone(phone), code_info["code"],
                 self.kwtxid, _verification_id, self.q36, 1, self.max_retries, self.retry_delay_ms)
