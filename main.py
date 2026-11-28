@@ -238,10 +238,13 @@ def _gen_verification_id() -> str:
     import urllib.parse as _up
     return _up.quote(_b64.b64encode(os.urandom(46)).decode(), safe='')
 
-def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002', verification_id=''):
+def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004', verification_id=''):
     try:
+        # 盲盒档(60004)沿用旧版参数：terminal=1 / type=blindBox；其他档位用真机同款 terminal=2 / type=tixian
+        _is_blindbox = str(quota_id) == '60004'
         params = {'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone, 'appuid': appUid,
-                  'apiv': '9', 'terminal': '2', 'quotaId': quota_id, 'type': 'tixian'}
+                  'apiv': '9', 'terminal': '1' if _is_blindbox else '2', 'quotaId': quota_id,
+                  'type': 'blindBox' if _is_blindbox else 'tixian'}
         if verification_id:
             params['verificationId'] = verification_id
         resp = requests.get(
@@ -349,10 +352,10 @@ class KuwoPlugin(Star):
         self.timeout = self.config.get('timeout', 300)
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay_ms = self.config.get('retry_delay_ms', 4000)
-        self.quota_id = self.config.get('quota_id', "30002")
-        # 发码档位必须与提现档位(kwtxid=30002)一致，60004是盲盒档，码与档位不匹配会被服务器判为"验证码已过期"
-        if self.quota_id == "60004":
-            self.quota_id = "30002"
+        # 发码档位（60004 盲盒档），与提现档位 kwtxid(30002) 解耦；
+        # 若历史配置里被写成 30002，视为旧同步值，回落到 60004
+        _qi = str(self.config.get('quota_id') or '').strip()
+        self.quota_id = _qi if (_qi and _qi != '30002') else '60004'
         self.admin_qq = self.config.get('admin_qq', [])
         # 触发→真正发出提现请求的实测开销（秒）：每场独立实测，不和上一场混合
         self._send_overhead = 0.0
@@ -602,9 +605,9 @@ class KuwoPlugin(Star):
             uid, sid, appuid, _ = login
             if check_today and check_withdraw_today(uid, sid, self._get_effective_today_str()):
                 return (phone, "今日已提现，跳过", False)
-            # 发码不带 verificationId（与真机抓包一致）；
-            # 发码挡位 quotaId 直接跟随提现任务的 kwtxid，不再另用 quota_id
-            success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.kwtxid, '')
+            # 发码不带 verificationId（与真机抓包一致）；quotaId 用发码档位 quota_id（60004 盲盒档），
+            # 不跟提现档位 kwtxid(30002) 绑定
+            success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id, '')
             if success:
                 if vid:
                     self._verification_id_mem[phone] = {"vid": vid, "expire": time.time() + 600}
