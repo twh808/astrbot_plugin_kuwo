@@ -519,14 +519,17 @@ class KuwoPlugin(Star):
         if user_id not in self.states:
             return
         state = self.states[user_id]
-        if state.get('menu') or state.get('step'):
-            umo = state.get('umo')
-            if umo:
-                try:
-                    await self.context.send_message(umo, MessageChain().message("⏰ 操作已超时，已退出交互。"))
-                except:
-                    pass
+        # 已退出菜单（menu/step 均为空）时不该再提示超时，静默清理即可
+        if not (state.get('menu') or state.get('step')):
             self._clear_state(user_id)
+            return
+        umo = state.get('umo')
+        if umo:
+            try:
+                await self.context.send_message(umo, MessageChain().message("⏰ 操作已超时，已退出交互。"))
+            except:
+                pass
+        self._clear_state(user_id)
 
     def _schedule_timeout(self, user_id: str):
         if user_id in self.timeout_tasks:
@@ -682,7 +685,6 @@ class KuwoPlugin(Star):
         text = event.message_str.strip()
         if text == "0":
             self._clear_state(user_id)
-            self._schedule_timeout(user_id)
             yield event.plain_result("👋 已退出菜单")
         elif text == "1":
             self._update_state(user_id, menu='account', step=None)
