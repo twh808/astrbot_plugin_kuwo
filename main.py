@@ -222,7 +222,7 @@ def _gen_verification_id() -> str:
 def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002', verification_id=''):
     try:
         params = {'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone, 'appuid': appUid,
-                  'apiv': '9', 'terminal': '1', 'quotaId': quota_id, 'type': 'highValue'}
+                  'apiv': '9', 'terminal': '2', 'quotaId': quota_id, 'type': 'tixian'}
         if verification_id:
             params['verificationId'] = verification_id
         resp = requests.get(
@@ -275,8 +275,10 @@ def withdraw_confirm_once(session, phone, loginUid, loginSid, appUid, encrypted_
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/getWithdraw'
     params = {'encry': '', 'type': '', 'quotaId': kwtxid, 'loginUid': loginUid, 'loginSid': loginSid,
               'appuid': appUid, 'source': 'kwplayer_ip_12.1.2.0_TJ.ipa', 'version': '1', 'phone': encrypted_phone,
-              'verificationId': verification_id, 'apiv': '9', 'code': code, 'platform': 'ios',
+              'apiv': '9', 'code': code, 'platform': 'ios',
               'cliVersion': '12.1.2.0', 'q36': q36}
+    if verification_id:
+        params['verificationId'] = verification_id
     headers = {'Host': 'integralapi.kuwo.cn', 'Accept': 'application/json, text/plain, */*',
                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 KWMusic/12.1.2.0 DeviceModel/iPhone18,3 NetType/WWAN kuwopage',
                'Origin': 'https://h5app.kuwo.cn', 'Referer': 'https://h5app.kuwo.cn/',
@@ -581,20 +583,16 @@ class KuwoPlugin(Star):
             uid, sid, appuid, _ = login
             if check_today and check_withdraw_today(uid, sid, self._get_effective_today_str()):
                 return (phone, "今日已提现，跳过", False)
-            # 发码时自带客户端生成的 verificationId（真机就是客户端生成、发码提交、提现配对）；
-            # 服务器不认时回退老参重发一次，保证发码不受影响
-            _vid_new = _gen_verification_id()
-            success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id, _vid_new)
-            if not success:
-                logger.warning(f"⚠️ {phone} 带自生成 verificationId 发码失败({msg})，回退无vid重发")
-                success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id, '')
-                if success:
-                    _vid_new = ''
+            # 【已停用自生成 verificationId】
+            # 11-26 起改用客户端随机生成 vid 后，错误从"验证码已失效"变成"账号存在风险"，
+            # 服务端疑似把"格式合法但库中不存在"的 vid 判为伪造凭证并触发数美风控。
+            # 现回退为不带 vid 发码（与真机抓包一致，真机 sendCode 也不带此参数），
+            # 提现仍回退配置值，作为诊断场。
+            success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id, '')
             if success:
-                _vid_use = vid or _vid_new
-                if _vid_use:
-                    self._verification_id_mem[phone] = {"vid": _vid_use, "expire": time.time() + 600}
-                    msg = f"{msg} (vid:{_vid_use[:10]}...)"
+                if vid:
+                    self._verification_id_mem[phone] = {"vid": vid, "expire": time.time() + 600}
+                    msg = f"{msg} (vid:{vid[:10]}...)"
                 else:
                     logger.warning(f"⚠️ {phone} 无可用 verificationId，提现将回退配置旧值")
             return (phone, msg, success)
@@ -1256,14 +1254,15 @@ class KuwoPlugin(Star):
                 await asyncio.to_thread(time.time)
                 return (phone, None, "dry-run", False)
             session = self._get_thread_session()
-            # 优先用本次发码返回的 verificationId（服务器按它校验验证码有效期），配置值仅兜底
+            # 优先用本次发码返回的 verificationId；服务器从未下发过，配置里的陈年旧值
+            # 已被验证为无效（报"验证码已失效"甚至触发风控），故无本场值时不带该参数
             _vid_info = self._verification_id_mem.get(phone)
-            _verification_id = self.verification_id
+            _verification_id = ''
             if _vid_info and time.time() <= _vid_info.get("expire", 0) and _vid_info.get("vid"):
                 _verification_id = _vid_info["vid"]
                 logger.info(f"🔑 {phone} 使用本场发码 verificationId: {_verification_id[:12]}...")
             else:
-                logger.warning(f"⚠️ {phone} 无本场发码 verificationId，回退配置值（可能被判验证码已过期）")
+                logger.info(f"🔑 {phone} 无本场发码 verificationId，本次请求不带该参数")
             log_lines, final_msg, is_success = await asyncio.to_thread(
                 withdraw_confirm_once, session, phone, uid, sid, appuid, encrypt_phone(phone), code_info["code"],
                 self.kwtxid, _verification_id, self.q36, 1, self.max_retries, self.retry_delay_ms)
