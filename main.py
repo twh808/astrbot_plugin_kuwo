@@ -6,7 +6,7 @@ import time
 import re
 import base64
 import random
-import stringa
+import string
 import uuid
 import email.utils
 import threading
