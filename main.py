@@ -6,7 +6,7 @@ import time
 import re
 import base64
 import random
-import string
+import stringa
 import uuid
 import email.utils
 import threading
@@ -238,55 +238,84 @@ def _gen_verification_id() -> str:
     import urllib.parse as _up
     return _up.quote(_b64.b64encode(os.urandom(46)).decode(), safe='')
 
+def _extract_vid_from_resp(resp, data):
+    """从发码响应里提取 verificationId（body 字段或响应头）。"""
+    vid = ""
+    _d = data.get('data') if isinstance(data.get('data'), dict) else {}
+    for _k in ('verificationId', 'verification_id', 'verifyId', 'vid'):
+        if _d.get(_k):
+            return str(_d[_k])
+    for _k in ('verificationId', 'verification_id', 'verifyId', 'vid'):
+        if data.get(_k):
+            return str(data[_k])
+    for _hk, _hv in resp.headers.items():
+        if _hk.lower().replace('-', '') in ('verificationid', 'verifyid', 'vid') and _hv:
+            return str(_hv)
+    return vid
+
+
+# 发码通道：依次尝试，直到确认短信真的下发
+# (type, terminal, apiv) —— 第 1 档与真机抓包完全一致
+SEND_CODE_CHANNELS = (
+    ('tixian', '2', '9'),
+    ('highValue', '2', '9'),
+    ('', '2', '9'),
+    ('tixian', '1', '9'),
+)
+
 def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='30002', verification_id=''):
-    try:
-        params = {'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone, 'appuid': appUid,
-                  'apiv': '9', 'terminal': '2', 'quotaId': quota_id, 'type': 'tixian'}
-        if verification_id:
-            params['verificationId'] = verification_id
-        resp = requests.get(
-            'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode',
-            params=params,
-            headers={'Host': 'integralapi.kuwo.cn', 'Connection': 'keep-alive',
-                     'Accept': 'application/json, text/plain, */*',
-                     'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro; wv) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Mobile Safari/537.36 kuwopage',
-                     'Origin': 'https://h5app.kuwo.cn', 'X-Requested-With': 'cn.kuwo.player',
-                     'Referer': 'https://h5app.kuwo.cn/',
-                     'Accept-Encoding': 'gzip, deflate, br',
-                     'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7'},
-            timeout=5, verify=False)
-        text = resp.text
+    last_combined, last_vid = '', ''
+    for idx, (typ, terminal, apiv) in enumerate(SEND_CODE_CHANNELS):
         try:
-            data = resp.json()
-            combined = f"{data.get('msg', '')}|{data.get('data', {}).get('description', '')}"
-        except:
-            data = {}
-            combined = text
-        lower_text = (text + str(data.get('msg', '')) + str(data.get('data', {}).get('description', ''))).lower()
-        ok = '发送成功' in lower_text
-        # 发码成功时，响应里带本次验证码对应的 verificationId（可能是 body 字段，也可能在响应头）
-        vid = ""
-        if ok:
-            _d = data.get('data') if isinstance(data.get('data'), dict) else {}
-            for _k in ('verificationId', 'verification_id', 'verifyId', 'vid'):
-                if _d.get(_k):
-                    vid = str(_d[_k])
-                    break
-            if not vid:
-                for _k in ('verificationId', 'verification_id', 'verifyId', 'vid'):
-                    if data.get(_k):
-                        vid = str(data[_k])
-                        break
-            if not vid:
-                for _hk, _hv in resp.headers.items():
-                    if _hk.lower().replace('-', '') in ('verificationid', 'verifyid', 'vid') and _hv:
-                        vid = str(_hv)
-                        break
-            # 诊断：响应头 + body 全打出来，确认 verificationId 的真实位置
-            logger.info(f"📨 sendCode 响应头: {dict(resp.headers)} | body: {text[:260]}")
-        return ok, combined, vid
-    except Exception as e:
-        return False, str(e), ""
+            params = {'loginUid': loginUid, 'loginSid': loginSid, 'mobile': encrypted_phone, 'appuid': appUid,
+                      'apiv': apiv, 'terminal': terminal, 'quotaId': quota_id, 'type': typ}
+            if verification_id:
+                params['verificationId'] = verification_id
+            resp = requests.get(
+                'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode',
+                params=params,
+                headers={'Host': 'integralapi.kuwo.cn', 'Connection': 'keep-alive',
+                         'Accept': 'application/json, text/plain, */*',
+                         'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro; wv) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Mobile Safari/537.36 kuwopage',
+                         'Origin': 'https://h5app.kuwo.cn', 'X-Requested-With': 'cn.kuwo.player',
+                         'Referer': 'https://h5app.kuwo.cn/',
+                         'Accept-Encoding': 'gzip, deflate, br',
+                         'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7'},
+                timeout=5, verify=False)
+            text = resp.text
+            try:
+                data = resp.json()
+                combined = f"{data.get('msg', '')}|{data.get('data', {}).get('description', '')}"
+            except Exception:
+                data = {}
+                combined = text
+            lower_text = (text + str(data.get('msg', '')) + str(data.get('data', {}).get('description', ''))).lower()
+            last_combined = combined
+            hard_ok = ('发送成功' in lower_text) or ('已发送' in lower_text)
+            soft_ok = str(data.get('msg', '')).strip().lower() == 'success'
+            if hard_ok:
+                last_vid = _extract_vid_from_resp(resp, data)
+                logger.info(f"📨 sendCode 通道{idx+1}[{typ or '空type'}/{terminal}] 发送成功 | body: {text[:200]}")
+                return True, combined, last_vid
+            if soft_ok and ('额度' in combined or '上限' in combined):
+                # 接口受理但提示额度类信息：短信大概率没下发，换下一通道再试
+                logger.info(f"📨 sendCode 通道{idx+1}[{typ or '空type'}/{terminal}] 受理但额度受限，换通道: {combined}")
+                if idx + 1 < len(SEND_CODE_CHANNELS):
+                    time.sleep(1.0)
+                continue
+            if soft_ok:
+                last_vid = _extract_vid_from_resp(resp, data)
+                logger.info(f"📨 sendCode 通道{idx+1}[{typ or '空type'}/{terminal}] 接口受理 | body: {text[:200]}")
+                return True, combined, last_vid
+            logger.info(f"📨 sendCode 通道{idx+1}[{typ or '空type'}/{terminal}] 未成功: {combined}")
+            if idx + 1 < len(SEND_CODE_CHANNELS):
+                time.sleep(1.0)
+        except Exception as e:
+            last_combined = f"异常: {e}"
+            logger.info(f"📨 sendCode 通道{idx+1}[{typ or '空type'}/{terminal}] 异常: {e}")
+            if idx + 1 < len(SEND_CODE_CHANNELS):
+                time.sleep(1.0)
+    return False, last_combined or '未知错误', last_vid
 
 FREQUENT_ERROR_KEYWORD = "频繁"
 
@@ -602,18 +631,14 @@ class KuwoPlugin(Star):
             uid, sid, appuid, _ = login
             if check_today and check_withdraw_today(uid, sid, self._get_effective_today_str()):
                 return (phone, "今日已提现，跳过", False)
-            # 【已停用自生成 verificationId】
-            # 11-26 起改用客户端随机生成 vid 后，错误从"验证码已失效"变成"账号存在风险"，
-            # 服务端疑似把"格式合法但库中不存在"的 vid 判为伪造凭证并触发数美风控。
-            # 现回退为不带 vid 发码（与真机抓包一致，真机 sendCode 也不带此参数），
-            # 提现仍回退配置值，作为诊断场。
+            # 发码不带 verificationId（与真机抓包一致）
             success, msg, vid = send_code_once(uid, sid, appuid, encrypt_phone(phone), self.quota_id, '')
             if success:
                 if vid:
                     self._verification_id_mem[phone] = {"vid": vid, "expire": time.time() + 600}
                     msg = f"{msg} (vid:{vid[:10]}...)"
-                else:
-                    logger.warning(f"⚠️ {phone} 无可用 verificationId，提现将回退配置旧值")
+            elif ('额度' in msg) or ('上限' in msg):
+                msg = f"{msg}（4 条发码通道均被额度拦下，等额度恢复后会自动放行）"
             return (phone, msg, success)
         except Exception as e:
             return (phone, f"异常: {e}", False)
